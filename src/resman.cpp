@@ -62,10 +62,87 @@ public:
 };
 
 
-void CWvsApp::InitializeResMan_hook() {
-    DEBUG_MESSAGE("CWvsApp::InitializeResMan");
-    CWvsApp::InitializeResMan(this);
+static bool PathIsDirectory(const char* sPath) {
+    DWORD dwAttr = GetFileAttributesA(sPath);
+    return dwAttr != INVALID_FILE_ATTRIBUTES && (dwAttr & FILE_ATTRIBUTE_DIRECTORY);
+}
 
+static bool PathIsFile(const char* sPath) {
+    DWORD dwAttr = GetFileAttributesA(sPath);
+    return dwAttr != INVALID_FILE_ATTRIBUTES && !(dwAttr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static bool JoinPath(char* sOut, size_t uCap, const char* sDir, const char* sName) {
+    return SUCCEEDED(StringCbCopyA(sOut, uCap, sDir)) &&
+        SUCCEEDED(StringCbCatA(sOut, uCap, "/")) &&
+        SUCCEEDED(StringCbCatA(sOut, uCap, sName));
+}
+
+// Full img mode only after Base.wz has been dumped (zmap.img at Data root).
+// A half-exported Data/UI folder must not skip the packed .wz archives.
+static bool HasFullImgDataTree(const char* sDataPath) {
+    char sProbe[MAX_PATH];
+    return JoinPath(sProbe, sizeof(sProbe), sDataPath, "zmap.img") && PathIsFile(sProbe);
+}
+
+static bool MountFileSystemAtRoot(const char* sPath) {
+    try {
+        IWzFileSystemPtr pFileSystem;
+        PcCreateObject<IWzFileSystemPtr>(L"NameSpace#FileSystem", pFileSystem, nullptr);
+        pFileSystem->Init(sPath);
+        get_root()->Mount(L"/", pFileSystem, 0);
+        return true;
+    } catch (const _com_error&) {
+        DEBUG_MESSAGE("Failed to mount filesystem: %s", sPath);
+        return false;
+    }
+}
+
+// Port of ClientImageLoader's InitializeResMan: skip the .wz packages and serve
+// loose .img files from <game>/Data instead. The game dir is still mounted so
+// List.wz and Custom.wz remain reachable.
+static bool InitializeResManFromImg(const char* sGameDir, const char* sDataPath) {
+    try {
+        PcCreateObject<IWzResManPtr>(L"ResMan", get_rm(), nullptr);
+        get_rm()->SetResManParam(
+            static_cast<RESMAN_PARAM>(RC_AUTO_REPARSE | RC_AUTO_SERIALIZE),
+            -1,
+            -1);
+
+        PcCreateObject<IWzNameSpacePtr>(L"NameSpace", get_root(), nullptr);
+        PcSetRootNameSpace(get_root());
+
+        if (!MountFileSystemAtRoot(sGameDir)) {
+            return false;
+        }
+        if (!MountFileSystemAtRoot(sDataPath)) {
+            return false;
+        }
+        DEBUG_MESSAGE("ResMan: loading .img from %s", sDataPath);
+        return true;
+    } catch (const _com_error&) {
+        DEBUG_MESSAGE("ResMan: img init failed, falling back to .wz");
+        return false;
+    }
+}
+
+static bool OverlayImgData(const char* sDataPath) {
+    if (!MountFileSystemAtRoot(sDataPath)) {
+        return false;
+    }
+    try {
+        get_rm()->SetResManParam(
+            static_cast<RESMAN_PARAM>(RC_AUTO_REPARSE | RC_AUTO_SERIALIZE),
+            -1,
+            -1);
+    } catch (const _com_error&) {
+        DEBUG_MESSAGE("ResMan: could not enable AUTO_REPARSE for img overlay");
+    }
+    DEBUG_MESSAGE("ResMan: overlaying .img from %s", sDataPath);
+    return true;
+}
+
+static void MountCustomWz(const char* sGameDir) {
     // add custom namespace to root
     IWzWritableNameSpacePtr pWritableRoot;
     if (FAILED(get_root()->QueryInterface(&pWritableRoot))) {
@@ -81,11 +158,7 @@ void CWvsApp::InitializeResMan_hook() {
     // load Custom.wz from file system
     IWzFileSystemPtr fs;
     PcCreateObject<IWzFileSystemPtr>(L"NameSpace#FileSystem", fs, nullptr);
-    char sStartPath[MAX_PATH];
-    GetModuleFileNameA(nullptr, sStartPath, MAX_PATH);
-    Dir_BackSlashToSlash(sStartPath);
-    Dir_upDir(sStartPath);
-    fs->Init(sStartPath);
+    fs->Init(sGameDir);
 
     IWzPackagePtr pPackage;
     PcCreateObject<IWzPackagePtr>(L"NameSpace#Package", pPackage, nullptr);
@@ -132,6 +205,36 @@ void CWvsApp::InitializeResMan_hook() {
     // PCOM.dll - patch CWzProperty objects during serialization
     CWzProperty::raw_Serialize_orig = static_cast<CWzProperty::raw_Serialize_t>(GetAddressByPattern("PCOM.DLL", "B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 EC 68"));
     ATTACH_HOOK(CWzProperty::raw_Serialize_orig, CWzProperty::raw_Serialize_hook);
+}
+
+
+void CWvsApp::InitializeResMan_hook() {
+    DEBUG_MESSAGE("CWvsApp::InitializeResMan");
+    LogMessage("ResMan: begin");
+
+    char sStartPath[MAX_PATH];
+    GetModuleFileNameA(nullptr, sStartPath, MAX_PATH);
+    Dir_BackSlashToSlash(sStartPath);
+    Dir_upDir(sStartPath);
+
+    char sDataPath[MAX_PATH];
+    const bool bDataDir = JoinPath(sDataPath, sizeof(sDataPath), sStartPath, "Data") &&
+        PathIsDirectory(sDataPath);
+    const bool bFullImg = bDataDir &&
+        HasFullImgDataTree(sDataPath) &&
+        InitializeResManFromImg(sStartPath, sDataPath);
+
+    if (!bFullImg) {
+        get_rm() = nullptr;
+        get_root() = nullptr;
+        CWvsApp::InitializeResMan(this);
+        if (bDataDir) {
+            OverlayImgData(sDataPath);
+        }
+    }
+
+    MountCustomWz(sStartPath);
+    LogMessage("ResMan: done (img=%d)", bFullImg ? 1 : 0);
 }
 
 void CWvsApp::CleanUp_hook() {

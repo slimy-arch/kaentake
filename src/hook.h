@@ -57,6 +57,7 @@ void AttachIconIconMod();
 void AttachTempStatMod();
 void AttachShadowPartnerMod();
 void AttachMaxLevelMod();
+void AttachMaxHpMpMod();
 void AttachClientSocketMod();
 void AttachWorldMapInfoMod();
 
@@ -74,6 +75,7 @@ inline void AttachClientHooks() {
     AttachTempStatMod();
     AttachShadowPartnerMod();
     AttachMaxLevelMod();
+    AttachMaxHpMpMod();
     AttachClientSocketMod();
     AttachWorldMapInfoMod();
 }

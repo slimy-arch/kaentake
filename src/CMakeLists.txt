@@ -12,6 +12,7 @@ add_library(injector SHARED
     tooltip.cpp
     itemicon.cpp
     tempstat.cpp
+    shadowpartner.cpp
     stringpool.cpp
     debug.cpp
     hook.cpp

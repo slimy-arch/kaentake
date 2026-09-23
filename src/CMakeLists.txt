@@ -13,6 +13,7 @@ add_library(injector SHARED
     itemicon.cpp
     tempstat.cpp
     shadowpartner.cpp
+    maxlevel.cpp
     stringpool.cpp
     debug.cpp
     hook.cpp

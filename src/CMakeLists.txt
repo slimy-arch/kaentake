@@ -14,6 +14,9 @@ add_library(injector SHARED
     tempstat.cpp
     shadowpartner.cpp
     maxlevel.cpp
+    clientsocket.cpp
+    worldmapdata.cpp
+    worldmapinfo.cpp
     stringpool.cpp
     debug.cpp
     hook.cpp

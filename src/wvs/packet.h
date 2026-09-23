@@ -11,6 +11,34 @@ protected:
     unsigned short m_uRawSeq;
     unsigned short m_uDataLen;
     size_t m_uOffset;
+
+public:
+    // Inline readers over the members. Bounds follow CInPacket::Decode1 (0x004065F3), which checks
+    // m_uLength - m_uOffset, not the receive buffer's capacity.
+    size_t GetOffset() const {
+        return m_uOffset;
+    }
+    void SetOffset(size_t uOffset) {
+        m_uOffset = uOffset;
+    }
+    bool CanRead(size_t n) const {
+        return m_aRecvBuff.GetCount() != 0 && m_uOffset + n <= m_uLength;
+    }
+    const unsigned char* Current() const {
+        return &m_aRecvBuff[m_uOffset];
+    }
+    unsigned short Peek2() const {
+        return CanRead(2) ? *reinterpret_cast<const unsigned short*>(Current()) : 0;
+    }
+    template <typename T>
+    T Decode() {
+        if (!CanRead(sizeof(T))) {
+            return T{};
+        }
+        T value = *reinterpret_cast<const T*>(Current());
+        m_uOffset += sizeof(T);
+        return value;
+    }
 };
 
 static_assert(sizeof(CInPacket) == 0x18);

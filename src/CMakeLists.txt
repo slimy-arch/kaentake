@@ -15,6 +15,7 @@ add_library(injector SHARED
     shadowpartner.cpp
     maxlevel.cpp
     maxhpmp.cpp
+    maxmeso.cpp
     clientsocket.cpp
     worldmapdata.cpp
     worldmapinfo.cpp

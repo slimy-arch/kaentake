@@ -62,6 +62,8 @@ void AttachMaxMesoMod();
 void AttachClientSocketMod();
 void AttachWorldMapInfoMod();
 void AttachDamageRankMod();
+void AttachDamageSkinMod();
+void AttachDamageSkinPickerMod();
 
 inline void AttachClientHooks() {
     AttachClientBypass();
@@ -82,6 +84,8 @@ inline void AttachClientHooks() {
     AttachClientSocketMod();
     AttachWorldMapInfoMod();
     AttachDamageRankMod();
+    AttachDamageSkinMod();
+    AttachDamageSkinPickerMod();
 }
 
 

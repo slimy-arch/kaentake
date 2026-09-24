@@ -21,6 +21,8 @@ add_library(injector SHARED
     worldmapinfo.cpp
     uiDamageRank.cpp
     damagerankinput.cpp
+    damageskin.cpp
+    damageskinpicker.cpp
     stringpool.cpp
     debug.cpp
     hook.cpp

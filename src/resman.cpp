@@ -179,6 +179,11 @@ static void MountCustomWz(const char* sGameDir) {
             if (FAILED(pEnum->Next(1, &vNext, &uCeltFetched)) || uCeltFetched == 0) {
                 break;
             }
+            // Custom/BasicEff holds only the damage skins (damageskin.cpp reads them by their Custom/ path).
+            // It mirrors no base path, so walking it would add nothing but a 77 MB parse at every startup.
+            if (sPath.length() == 0 && wcscmp(V_BSTR(&vNext), L"BasicEff") == 0) {
+                continue;
+            }
             Ztl_bstr_t sUOL = (sPath.length() > 0 ? sPath + L"/" : L"") + V_BSTR(&vNext);
             Ztl_variant_t vObj = get_rm()->GetObjectA(L"Custom/" + sUOL);
             IUnknownPtr pUnk = vObj.GetUnknown();

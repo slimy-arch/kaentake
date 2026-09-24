@@ -2,6 +2,7 @@
 #include "hook.h"
 #include "clientsocket.h"
 #include "uiDamageRank.h"
+#include "damageskin.h"
 #include "wvs/packet.h"
 
 // Central inbound dispatcher for custom server -> client opcodes. Add new custom packets here rather
@@ -25,6 +26,12 @@ static void __fastcall CClientSocket__ProcessPacket_hook(void* pThis, void* _EDX
         return;
     case LP_DAMAGE_RANK:
         CUIDamageRank::GetInstance().HandleTrackerPacket(pPacket);
+        return;
+    case damageskin::LP_CATALOG:
+    case damageskin::LP_INVENTORY:
+    case damageskin::LP_RESULT:
+    case damageskin::LP_BROADCAST:
+        damageskin::HandlePacket(pPacket);
         return;
     }
     CClientSocket__ProcessPacket(pThis, pPacket);

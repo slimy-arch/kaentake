@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "hook.h"
+#include "uiDamageRank.h"
 #include "constants.h"
 #include "wvs/wvsapp.h"
 #include "wvs/wndman.h"
@@ -97,6 +98,17 @@ struct ISMSG {
 
 class CInputSystem : public TSingleton<CInputSystem, 0x00BEC33C> {
 };
+
+// CInputSystem::GetCursorPos — v95 sym, v83 VA 0x0059A388 (ret 4). Client-space cursor position.
+static bool GetInputCursorPos(POINT& pt) {
+    auto pInputSystem = CInputSystem::GetInstance();
+    if (!pInputSystem) {
+        return false;
+    }
+    pt = {};
+    reinterpret_cast<int(__thiscall*)(CInputSystem*, POINT*)>(0x0059A388)(pInputSystem, &pt);
+    return true;
+}
 
 class CConfig : public TSingleton<CConfig, 0x00BEBF9C> {
 };
@@ -365,12 +377,83 @@ int CLogin::SendCheckPasswordPacket_hook(char* sID, char* sPasswd) {
 
 
 int CWndMan::TranslateMessage_hook(UINT& msg, WPARAM& wParam, LPARAM& lParam, LRESULT* plResult) {
+    auto& damageRank = CUIDamageRank::GetInstance();
+    POINT pt;
+    // DamageRank drag: keep tracking when the cursor leaves the field (over a CWnd).
+    if (damageRank.IsDragging() && (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP) && GetInputCursorPos(pt)) {
+        if (msg == WM_MOUSEMOVE) {
+            damageRank.HandleMouseMove(pt.x, pt.y);
+        } else {
+            damageRank.HandleMouseLButtonUp(pt.x, pt.y);
+        }
+    }
     if (msg == WM_MOUSEWHEEL) {
+        if (GetInputCursorPos(pt) && damageRank.HandleMouseWheel(pt.x, pt.y, GET_WHEEL_DELTA_WPARAM(wParam))) {
+            *plResult = 1;
+            return 1;
+        }
         // CWndMan::ProcessMouse(this, msg, wParam, lParam);
         *plResult = reinterpret_cast<LRESULT(__thiscall*)(CWndMan*, UINT, WPARAM, LPARAM)>(0x009E3AE6)(this, msg, wParam, lParam);
         return 0;
     }
     return CWndMan::TranslateMessage(this, msg, wParam, lParam, plResult);
+}
+
+
+// Stands in for DefWindowProcA in CWvsApp::WindowProc: moves the window by hand on a title-bar drag
+// instead of entering the modal move loop, which freezes the game while the button is held.
+LRESULT __stdcall PreventWindowFreeze(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static POINT ptOffset;
+    static bool bMoving;
+
+    switch (msg) {
+    case WM_NCMOUSEMOVE:
+    case WM_MOUSEMOVE:
+        if (bMoving) {
+            if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
+                POINT ptCursor;
+                GetCursorPos(&ptCursor);
+                SetWindowPos(hWnd, nullptr, ptCursor.x - ptOffset.x, ptCursor.y - ptOffset.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            } else {
+                bMoving = false;
+                ReleaseCapture();
+            }
+        }
+        break;
+    case WM_NCLBUTTONDOWN:
+        if (SendMessageA(hWnd, WM_NCHITTEST, wParam, lParam) == HTCAPTION) {
+            RECT rcWnd;
+            POINT ptCursor;
+            GetWindowRect(hWnd, &rcWnd);
+            GetCursorPos(&ptCursor);
+            ptOffset.x = ptCursor.x - rcWnd.left;
+            ptOffset.y = ptCursor.y - rcWnd.top;
+            SetCapture(hWnd);
+            bMoving = true;
+        }
+        return 0;
+    case WM_NCLBUTTONUP:
+    case WM_LBUTTONUP: {
+        LRESULT nHit = SendMessageA(hWnd, WM_NCHITTEST, wParam, lParam);
+        if (nHit == HTMINBUTTON) {
+            ShowWindow(hWnd, SW_MINIMIZE);
+        } else if (nHit == HTCLOSE) {
+            PostQuitMessage(0);
+        }
+        bMoving = false;
+        ReleaseCapture();
+        break;
+    }
+    case WM_NCRBUTTONDOWN:
+    case WM_NCRBUTTONUP:
+        return 0;
+    case WM_RBUTTONUP:
+        if (bMoving) {
+            return 0;
+        }
+        break;
+    }
+    return DefWindowProcA(hWnd, msg, wParam, lParam);
 }
 
 
@@ -381,6 +464,10 @@ void AttachClientBypass() {
     ATTACH_HOOK(CWvsApp::Run, CWvsApp::Run_hook);
     ATTACH_HOOK(CLogin::SendCheckPasswordPacket, CLogin::SendCheckPasswordPacket_hook);
     ATTACH_HOOK(CWndMan::TranslateMessage, CWndMan::TranslateMessage_hook);
+    // CWvsApp::WindowProc — default branch `call [0xBF0418]` (DefWindowProcA, FF 15 18 04 BF 00)
+    if (memcmp(reinterpret_cast<const void*>(0x009FEBAF), "\xFF\x15\x18\x04\xBF\x00", 6) == 0) {
+        PatchCall(0x009FEBAF, &PreventWindowFreeze, 6);
+    }
 
     PatchRetZero(0x009FEC62); // CWvsApp::EnableWinKey
     PatchRetZero(0x009F18C9); // ShowStartUpWndModal

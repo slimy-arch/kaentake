@@ -1,5 +1,6 @@
 #pragma once
 #include "hook.h"
+#include "constants.h"
 #include "wvs/wnd.h"
 #include "wvs/util.h"
 #include "ztl/ztl.h"

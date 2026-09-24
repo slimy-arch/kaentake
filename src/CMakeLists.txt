@@ -19,6 +19,8 @@ add_library(injector SHARED
     clientsocket.cpp
     worldmapdata.cpp
     worldmapinfo.cpp
+    uiDamageRank.cpp
+    damagerankinput.cpp
     stringpool.cpp
     debug.cpp
     hook.cpp

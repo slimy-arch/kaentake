@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "hook.h"
 #include "constants.h"
+#include "uiDamageRank.h"
 #include "wvs/config.h"
 #include "wvs/wnd.h"
 #include "wvs/wndman.h"
@@ -117,9 +118,15 @@ void __cdecl set_stage_hook(CStage* pStage, void* pParam) {
         set_stage(pStage, pParam);
         return;
     }
+    // !CInterStage::ms_RTTI_CInterStage - leaving the field (login, char select): drop DamageRank
+    const bool bLeavingField = pStage && !pStage->IsKindOf(reinterpret_cast<const CRTTI*>(0x00BED874));
+    if (bLeavingField) {
+        CUIDamageRank::GetInstance().SetVisible(false);
+        CDamageRankData::GetInstance().Reset();
+    }
     set_stage(pStage, pParam);
-    // !CInterStage::ms_RTTI_CInterStage - change resolution after set_stage
-    if (pStage && !pStage->IsKindOf(reinterpret_cast<const CRTTI*>(0x00BED874))) {
+    // change resolution after set_stage
+    if (bLeavingField) {
         set_screen_resolution(0, 0);
     }
 }

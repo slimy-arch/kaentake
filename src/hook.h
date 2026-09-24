@@ -61,6 +61,7 @@ void AttachMaxHpMpMod();
 void AttachMaxMesoMod();
 void AttachClientSocketMod();
 void AttachWorldMapInfoMod();
+void AttachDamageRankMod();
 
 inline void AttachClientHooks() {
     AttachClientBypass();
@@ -80,6 +81,7 @@ inline void AttachClientHooks() {
     AttachMaxMesoMod();
     AttachClientSocketMod();
     AttachWorldMapInfoMod();
+    AttachDamageRankMod();
 }
 
 

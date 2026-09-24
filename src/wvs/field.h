@@ -16,6 +16,8 @@ public:
 class CField : public CMapLoadable {
 public:
     MEMBER_AT(ZRef<CWnd>, 0x1C8, m_pClock) // ZRef<CClock>
+    // CField::OnKey — v95 sym, v83 VA 0x00529968 (ret 8)
+    inline static auto OnKey = reinterpret_cast<void(__thiscall*)(CField*, unsigned int, int)>(0x00529968);
 };
 
 

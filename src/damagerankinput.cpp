@@ -7,7 +7,9 @@
 // not a CWnd, so it only sees input the field would otherwise get; drag/wheel fallbacks live in bypass.cpp.
 //
 // The toggle is a Key Config shortcut: FUNCKEY_MAPPED type 4 (UI menu), id 55, icon
-// UI/UIWindow.img/KeyConfig/icon/55. The stock palette holds 40 fixed slots (type 4 ids 0-27, type 5 ids
+// UI/UIWindow.img/KeyConfig/icon/55. The icon ships in Custom.wz at the same path, and resman.cpp's
+// serialize hook merges it into the stock KeyConfig/icon property, so the client reads it like any other
+// icon. The stock palette holds 40 fixed slots (type 4 ids 0-27, type 5 ids
 // 50-54, type 6 ids 100-106); id 55 goes into slot 40, whose position (145,335) already exists in the
 // palette position table at 0x00BE27E0. The server stores any non-skill binding as-is, and its default
 // keymaps put this on F12 (scan code 88).

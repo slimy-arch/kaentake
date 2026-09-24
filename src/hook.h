@@ -58,6 +58,7 @@ void AttachTempStatMod();
 void AttachShadowPartnerMod();
 void AttachMaxLevelMod();
 void AttachMaxHpMpMod();
+void AttachMaxMesoMod();
 void AttachClientSocketMod();
 void AttachWorldMapInfoMod();
 
@@ -76,6 +77,7 @@ inline void AttachClientHooks() {
     AttachShadowPartnerMod();
     AttachMaxLevelMod();
     AttachMaxHpMpMod();
+    AttachMaxMesoMod();
     AttachClientSocketMod();
     AttachWorldMapInfoMod();
 }

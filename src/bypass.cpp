@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "hook.h"
 #include "uiDamageRank.h"
+#include "cashshopwnd.h"
 #include "constants.h"
 #include "wvs/wvsapp.h"
 #include "wvs/wndman.h"
@@ -235,6 +236,8 @@ void CWvsApp::SetUp_hook() {
 }
 
 void CWvsApp::CallUpdate_hook(int tCurTime) {
+    // Opens/closes the cash shop window on the main thread; the receive path only raises a flag.
+    CashShopWnd_Tick();
     if (m_bFirstUpdate) {
         m_tUpdateTime = tCurTime;
         m_bFirstUpdate = 0;

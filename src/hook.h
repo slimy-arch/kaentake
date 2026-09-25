@@ -67,6 +67,7 @@ void AttachDamageSkinMod();
 void AttachDamageSkinPickerMod();
 void AttachCashShopWndMod();
 void AttachSkillUiMod();
+void AttachLongKeyboardMod();
 
 inline void AttachClientHooks() {
     AttachClientBypass();
@@ -92,6 +93,7 @@ inline void AttachClientHooks() {
     AttachDamageSkinPickerMod();
     AttachCashShopWndMod();
     AttachSkillUiMod();
+    AttachLongKeyboardMod();
 }
 
 

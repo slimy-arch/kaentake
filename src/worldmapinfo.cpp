@@ -655,8 +655,8 @@ static void RedrawIfShown(int nMapID) {
 // Hooks
 // =====================================================================================================
 
-// Same test as CWorldMapDlg::CheckSpotInfo: first spot with |dx|, |dy| <= markWidth / 3.
-static int FindSpotMapID(char* pDlg, int rx, int ry) {
+// Same test as CWorldMapDlg::CheckSpotInfo (shared with hyperteleportrock.cpp): first spot with |dx|, |dy| <= markWidth / 3.
+int FindWorldMapSpotMapID(char* pDlg, int rx, int ry) {
     char* pSpots = *reinterpret_cast<char**>(pDlg + wm::OFF_SPOTS);
     IWzCanvas** apMark = *reinterpret_cast<IWzCanvas***>(pDlg + wm::OFF_MARK_CANVAS);
     if (!pSpots) {
@@ -687,7 +687,7 @@ static int __fastcall CWorldMapDlg__OnMouseMove_hook(IUIMsgHandler* pThis, void*
     int nMapID = 0;
     try {
         if (get_field()) {
-            nMapID = FindSpotMapID(reinterpret_cast<char*>(pThis) - 4, rx, ry);
+            nMapID = FindWorldMapSpotMapID(reinterpret_cast<char*>(pThis) - 4, rx, ry);
         }
     } catch (...) {
     }

@@ -19,6 +19,7 @@ add_library(injector SHARED
     clientsocket.cpp
     worldmapdata.cpp
     worldmapinfo.cpp
+    hyperteleportrock.cpp
     uiDamageRank.cpp
     damagerankinput.cpp
     damageskin.cpp

@@ -61,6 +61,7 @@ void AttachMaxHpMpMod();
 void AttachMaxMesoMod();
 void AttachClientSocketMod();
 void AttachWorldMapInfoMod();
+void AttachHyperTeleportRockMod();
 void AttachDamageRankMod();
 void AttachDamageSkinMod();
 void AttachDamageSkinPickerMod();
@@ -83,6 +84,7 @@ inline void AttachClientHooks() {
     AttachMaxMesoMod();
     AttachClientSocketMod();
     AttachWorldMapInfoMod();
+    AttachHyperTeleportRockMod();
     AttachDamageRankMod();
     AttachDamageSkinMod();
     AttachDamageSkinPickerMod();

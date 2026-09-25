@@ -65,6 +65,7 @@ void AttachHyperTeleportRockMod();
 void AttachDamageRankMod();
 void AttachDamageSkinMod();
 void AttachDamageSkinPickerMod();
+void AttachCashShopWndMod();
 
 inline void AttachClientHooks() {
     AttachClientBypass();
@@ -88,6 +89,7 @@ inline void AttachClientHooks() {
     AttachDamageRankMod();
     AttachDamageSkinMod();
     AttachDamageSkinPickerMod();
+    AttachCashShopWndMod();
 }
 
 

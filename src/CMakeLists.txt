@@ -25,6 +25,7 @@ add_library(injector SHARED
     damageskin.cpp
     damageskinpicker.cpp
     cashshopwnd.cpp
+    skillui.cpp
     stringpool.cpp
     debug.cpp
     hook.cpp

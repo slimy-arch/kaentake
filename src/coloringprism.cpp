@@ -378,7 +378,7 @@ constexpr PrismLayout kLayout = {
     /* preview l,t,r,b  */ 10, 119, 290, 270,    // r/b exclusive
     /* preview seps     */ kLayoutNone, kLayoutNone,   // no painted separators on the glass
     /* avatarHalfW      */ 18,
-    /* avatarX, Y       */ 150, 252,             // feet on the cyan floor ring
+    /* avatarX, Y       */ 150, 234,             // feet on the cyan floor ring; ring centre = feet - 37
     /* chip size,y,pad  */ 14, 124, 3,           // top-right corner, clear of the avatar
     /* chipX            */ { 252, 269 },
     /* rows t,step,h    */ 277, 26, 22,
@@ -863,6 +863,12 @@ public:
     // middle of the real canvas. Null means canvas creation failed, and then the margin is
     // zero and the window is its old self.
     IWzCanvasPtr m_pChrome;
+    // A fully transparent canvas the size of the whole window canvas, composited over it for a
+    // few frames after an effect drew into the margin. Compositing transparent pixels changes
+    // nothing, but it goes through the canvas API, which is what makes the renderer re-upload
+    // the margin the raw clear has just zeroed. Belt and braces with the clear's dirty rect.
+    IWzCanvasPtr m_pBlank;
+    int          m_nMarginRefresh = 0;
     int          m_marginX, m_marginY;
     // Whether the margin can be ERASED. Set from the clear every Draw: if the surface cannot be
     // written, the margin is left alone rather than painted into, because an effect drawn where
@@ -2002,6 +2008,19 @@ CUIColorPrism::CUIColorPrism(int nLeft, int nTop)
         m_pChrome = nullptr;
     }
     if (!m_pChrome) m_marginX = m_marginY = 0;
+    if (m_pChrome) {
+        try {
+            PcCreateObject<IWzCanvasPtr>(L"Canvas", m_pBlank, nullptr);
+            if (m_pBlank) {
+                m_pBlank->Create(CanvasW(), CanvasH(), 0, CP_A8R8G8B8);
+                // A fresh canvas is undefined memory; zero it once, before it is ever drawn.
+                if (!WeaponTint_ClearCanvas(m_pBlank.GetInterfacePtr(), CanvasW(), CanvasH()))
+                    m_pBlank = nullptr;
+            }
+        } catch (...) {
+            m_pBlank = nullptr;
+        }
+    }
     // The window layer starts at (chrome - margin), so the chrome cannot sit closer to the top
     // left than the margin without putting that origin negative. Nudging it in is better than
     // finding out how CreateWnd handles a negative corner.
@@ -2545,6 +2564,10 @@ void CUIColorPrism::Draw(const RECT* pRect) {
         m_bMarginPaint = WeaponTint_ClearCanvas(pReal.GetInterfacePtr(),
                                                 CanvasW(), CanvasH());
     }
+    if (m_bMarginPaint && m_nMarginRefresh > 0 && m_pBlank) {
+        --m_nMarginRefresh;
+        BlitA(pReal, m_pBlank, 0, 0);
+    }
     IWzCanvasPtr pCanvas = m_pChrome ? m_pChrome : pReal;
     // One face per kLayout colour role; the client's basic font stands in for any that
     // failed to create.
@@ -2903,6 +2926,11 @@ void CUIColorPrism::Draw(const RECT* pRect) {
     DrawSkillFx(pReal, mL, mT, mR, 0,  CanvasW(), CanvasH(), keep);   // right
     DrawSkillFx(pReal, mL, mT, mL, 0,  mR,        mT,        keep);   // top
     DrawSkillFx(pReal, mL, mT, mL, mB, mR,        CanvasH(), keep);   // bottom
+    // Anything drawn this frame may have reached the margin; keep refreshing it for a few
+    // frames after the last one, so the final frame of the cast is erased from the screen too.
+    for (int i = 0; i < m_nSkillFxCount; ++i) {
+        if (m_skillFx[i].frame) { m_nMarginRefresh = 4; break; }
+    }
 }
 
 // ---------------------------------------------------------------------------

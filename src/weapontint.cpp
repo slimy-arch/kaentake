@@ -474,8 +474,11 @@ bool CopyTileLocked(IWzCanvas* pCanvas, int ix, int iy, int x0, int y0, int cols
         }
     }
     if (base) {
-        // NULL, exactly as the client's own consumer does at 0x005DAA9C.
-        __try { raw->raw__UnlockAddress(nullptr); }
+        // A READ unlocks with NULL, exactly as the client's own reader does at 0x005DAA9C.
+        // A WRITE names the rect it changed (IWzRawCanvas::_UnlockAddress takes `RECT* prc`),
+        // so the renderer's converted copy of that tile is refreshed from the new pixels.
+        RECT rcDirty = { 0, 0, cols, rows };
+        __try { raw->raw__UnlockAddress(write ? &rcDirty : nullptr); }
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     __try { raw->Release(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -2734,7 +2737,12 @@ bool ClearTileLocked(IWzCanvas* pCanvas, int tx, int ty, int cols, int rows) {
         }
     }
     if (base) {
-        __try { raw->raw__UnlockAddress(nullptr); }
+        // THE DIRTY RECT IS THE POINT OF THIS CALL. IWzRawCanvas::_UnlockAddress takes
+        // `RECT* prc`; with NULL the pixels are zeroed but the renderer keeps drawing its
+        // converted copy of the tile, which is how the last frame of a skill effect stayed on
+        // screen in the window margin after the cast ended (Brandish's blade tip).
+        RECT rcDirty = { 0, 0, cols, rows };
+        __try { raw->raw__UnlockAddress(&rcDirty); }
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     __try { raw->Release(); } __except (EXCEPTION_EXECUTE_HANDLER) {}

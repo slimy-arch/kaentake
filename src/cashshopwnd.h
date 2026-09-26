@@ -27,3 +27,6 @@ void CashShopWnd_HandleSync(CInPacket* pPacket);
 // Per-frame driver from CWvsApp::CallUpdate_hook (bypass.cpp). Creating a CWnd is a
 // main-thread job, so the server's "open" arrives as a flag and is acted on here.
 void CashShopWnd_Tick();
+
+// Routed from inventorynx.cpp's INVENTORY_CASH handler: updates the NX readout while the window is open.
+void CashShopWnd_SetNxCredit(long long nNxCredit);

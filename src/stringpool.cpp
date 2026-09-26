@@ -50,4 +50,7 @@ void EncodeString(int nIdx, const char* sSource, char* sDestination) {
 
 void AttachStringPoolMod() {
     REPLACE_STRING(1163, "Kaentake");
+    // CUIMonsterBook::OnCreate 0x00862708: the stock magnifier (nId 0x7D0) takes its skin from this slot,
+    // and nothing else reads it. Point it at the Monster Book search art in Custom.wz (Brass Ledger).
+    REPLACE_STRING(0xA1A, "Custom/UI/UIWindow.img/MonsterBookSearch/BtSearch");
 }

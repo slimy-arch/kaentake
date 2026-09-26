@@ -238,6 +238,16 @@ void CWvsApp::SetUp_hook() {
 void CWvsApp::CallUpdate_hook(int tCurTime) {
     // Opens/closes the cash shop window on the main thread; the receive path only raises a flag.
     CashShopWnd_Tick();
+    // Monster Book: no-ops with the book closed. Queries are sent and views rebuilt here, so nothing
+    // engine-side runs on the packet or draw paths.
+    try {
+        MonsterBookDrops_OnClientTick();
+    } catch (...) {
+    }
+    try {
+        MonsterBookSearch_OnClientTick();
+    } catch (...) {
+    }
     if (m_bFirstUpdate) {
         m_tUpdateTime = tCurTime;
         m_bFirstUpdate = 0;

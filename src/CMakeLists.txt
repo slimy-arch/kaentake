@@ -27,6 +27,7 @@ add_library(injector SHARED
     cashshopwnd.cpp
     skillui.cpp
     longkeyboard.cpp
+    quickslotdlg.cpp
     stringpool.cpp
     debug.cpp
     hook.cpp

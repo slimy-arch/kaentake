@@ -28,6 +28,11 @@ add_library(injector SHARED
     skillui.cpp
     longkeyboard.cpp
     quickslotdlg.cpp
+    magicdmg.cpp
+    critrouting.cpp
+    critratedisplay.cpp
+    statdetaillayout.cpp
+    statuilayout.cpp
     crashlog.cpp
     stringpool.cpp
     debug.cpp

@@ -3,6 +3,7 @@
 #include "constants.h"
 #include "uiDamageRank.h"
 #include "damageskin.h"
+#include "storagebag.h"
 #include "wvs/config.h"
 #include "wvs/wnd.h"
 #include "wvs/wndman.h"
@@ -125,6 +126,7 @@ void __cdecl set_stage_hook(CStage* pStage, void* pParam) {
     if (bLeavingField) {
         CUIDamageRank::GetInstance().SetVisible(false);
         CDamageRankData::GetInstance().Reset();
+        StorageBag_OnLeaveField();
     }
     // CLogin::ms_RTTI_CLogin 0x00BEDA30 (returned by 0x005F3E37, in the CLogin vtable three slots before
     // CLogin::Init 0x005F42CD)

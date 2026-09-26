@@ -4,6 +4,7 @@
 #include "uiDamageRank.h"
 #include "damageskin.h"
 #include "cashshopwnd.h"
+#include "storagebag.h"
 #include "wvs/packet.h"
 
 // Central inbound dispatcher for custom server -> client opcodes. Add new custom packets here rather
@@ -41,6 +42,9 @@ static void __fastcall CClientSocket__ProcessPacket_hook(void* pThis, void* _EDX
         return;
     case kCashShopSyncOpcode: // Server SendOpcode.CASHSHOP_WINDOW_SYNC; handler skips the opcode itself
         CashShopWnd_HandleSync(pPacket);
+        return;
+    case kStorageBagSnapshotOpcode: // Server SendOpcode.BAG_WINDOW; handler skips the opcode itself
+        StorageBag_HandlePacket(pPacket);
         return;
     }
     CClientSocket__ProcessPacket(pThis, pPacket);

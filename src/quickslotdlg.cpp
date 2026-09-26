@@ -23,7 +23,8 @@ struct MemberDisp {
     unsigned int uNew;
 };
 
-// Generated from the disassembly of 0x0072CA6B-0x0072DFF3 (all functions of the dialog).
+// Generated from the disassembly of 0x0072CA6B-0x0072DFF3 (all functions of the dialog): every memory
+// displacement AND every immediate in the member range (Draw reaches +0xF8 twice through add eax,0F8h).
 // Displacements are relative to each function's base register: this, or this+4 (OnKey, OnMouseButton,
 // reached through the IUIMsgHandler vtable 0xAFDA2C) or this+8 (dtor body). Remap: +0x9C..+0xE7 -> +0x48,
 // +0xE8..+0xFB -> +0xD8. Excluded: Draw's push [eax+0ACh] at 0x0072D867 (SKILLENTRY, not a member).
@@ -65,7 +66,9 @@ static const MemberDisp g_aMemberDisp[] = {
     {0x0072D186, 0x0F8, 0x1D0}, // Draw                   lea ecx, [esi + 0xf8]
     {0x0072D237, 0x0F8, 0x1D0}, // Draw                   lea edi, [esi + 0xf8]
     {0x0072D2F8, 0x0F8, 0x1D0}, // Draw                   cmp dword ptr [esi + 0xf8], ebx
+    {0x0072D2AA, 0x0F8, 0x1D0}, // Draw                   add eax, 0xf8 (imm32; eax = this from [ebp-1Ch])
     {0x0072D2FE, 0x0F8, 0x1D0}, // Draw                   lea eax, [esi + 0xf8]
+    {0x0072D323, 0x0F8, 0x1D0}, // Draw                   add eax, 0xf8 (imm32; eax = this from [ebp-1Ch])
     {0x0072D366, 0x0F8, 0x1D0}, // Draw                   cmp dword ptr [eax + 0xf8], ebx
     {0x0072D36C, 0x0F8, 0x1D0}, // Draw                   lea esi, [eax + 0xf8]
     {0x0072DDBE, 0x09C, 0x0E4}, // focus: Tab             mov eax, dword ptr [esi + 0x9c]
@@ -163,6 +166,7 @@ void __fastcall CQuickslotKeyModifyDlg__OnKey_hook(void* pThis4, void* _EDX, uns
 void AttachQuickslotDlgMod() {
     for (const MemberDisp& d : g_aMemberDisp) {
         if (*reinterpret_cast<unsigned int*>(d.uAddress) != d.uOld) {
+            LogMessage("quickslotdlg: unexpected disp 0x%X at 0x%08X, mod not applied", *reinterpret_cast<unsigned int*>(d.uAddress), d.uAddress);
             ErrorMessage("CQuickslotKeyModifyDlg: unexpected disp 0x%X at 0x%08X, mod not applied", *reinterpret_cast<unsigned int*>(d.uAddress), d.uAddress);
             return; // all or nothing: a partial relocation would corrupt the dialog
         }
@@ -191,4 +195,5 @@ void AttachQuickslotDlgMod() {
 
     ATTACH_HOOK(CQuickslotKeyModifyDlg__GetSlotPos, CQuickslotKeyModifyDlg__GetSlotPos_hook);
     ATTACH_HOOK(CQuickslotKeyModifyDlg__OnKey, CQuickslotKeyModifyDlg__OnKey_hook);
+    LogMessage("quickslotdlg: applied (%u member offsets, size 0x%X)", static_cast<unsigned int>(sizeof(g_aMemberDisp) / sizeof(g_aMemberDisp[0])), kDlgSize);
 }

@@ -13,8 +13,9 @@
 //
 // Art: the custom chrome ships in Custom.wz at UI/UIWindow.img/Bag and is read through the
 // Custom/ prefix, because resman.cpp's merge does not surface a new sub-property under an
-// existing .img. Stock pieces (Basic.img Tab2/VScr4/ItemNo, UIWindow.img/Item/BtSort) are read
-// from UI/ as usual. The original used UIWindow.img/Android/BtSort, which v83 does not have.
+// existing .img. The "Satchel" theme (leather frame, parchment cells) owns the background, the
+// tab pills and labels, the scrollbar and the AUTO art, all under Bag/. Stock pieces (Basic.img
+// ItemNo digits, UIWindow.img/Item/BtSort) are read from UI/ as usual. The original used UIWindow.img/Android/BtSort, which v83 does not have.
 //
 // Every address below was checked against v83.idb and this MapleStory.exe (image base
 // 0x00400000). The v95 PDB names are noted where the IDB leaves a function unnamed.
@@ -317,7 +318,7 @@ static constexpr int kGridTop  = 50;
 static constexpr int kIconDX   = 0;
 static constexpr int kIconBY   = kCell - 1;
 
-// Scrollbar — vanilla blue Basic.img/VScr4, overlaid in the right margin (col5 ends at x=183).
+// Scrollbar — Satchel Bag/scroll/{prev,next,base,thumb}, overlaid in the right margin (col5 ends at x=183).
 static constexpr int kScrollW   = 15;
 static constexpr int kScrollX   = 186;
 static constexpr int kSbArrowH  = 13;
@@ -330,9 +331,10 @@ static constexpr int kSearchBoxL   = 8;
 static constexpr int kSearchBoxR   = 199;
 static constexpr int kSearchBoxTop = 222;
 static constexpr int kSearchBoxBot = 242;
-static constexpr int kSearchTextX  = 6;
+static constexpr int kSearchTextX  = 13;   // 5px inside the box border (x=8)
 static constexpr int kSearchTextY  = 227;
 static constexpr int kSearchMax    = 32;
+static constexpr unsigned long kSatchelInk = 0xFF5C3414;   // search text / caret: the title plate's brown
 
 // Title-bar buttons overlaid on the RIGHT (the art bakes no button wells): sort/merge + close.
 static constexpr int kBtMergeX  = 173, kBtMergeY  = 5, kBtMergeW  = 12, kBtMergeH  = 12;
@@ -345,11 +347,11 @@ static constexpr int kBtCloseX  = 187, kBtCloseY  = 5, kBtCloseW  = 12, kBtClose
 static constexpr int kTabTop = 22, kTabBot = 40;
 static constexpr int kTabHitLeft[kKindCount]  = {   8,  56, 104, 152 };  // per-tab slot left
 static constexpr int kTabHitRight[kKindCount] = {  56, 104, 152, 200 };  // per-tab slot right
-static constexpr int kTabLabelX[kKindCount]   = {  24,  64, 116, 165 };  // centered label blit x
-// Vanilla-style tab pill (shared Basic.img/Tab2 9-slice) drawn behind each label: pink when active,
+// Satchel tab pill (Bag/tab/{on,off}/{left,fill,right}, 3-slice) drawn behind each label: parchment when
+// active, dark leather otherwise (the "off" art is transparent in its top 2 rows, so it sits lower).
 // grey otherwise — matching the item inventory tabs. Bottom meets the red separator line.
 static constexpr int kPillTop = 21;    // pill top y
-static constexpr int kPillH   = 19;    // Basic.img/Tab2 fill height
+static constexpr int kPillH   = 19;    // Bag/tab fill height
 static constexpr int kPillPad = 2;     // inset of the pill within its tab slot
 static constexpr int kTabLabelY = kPillTop + (kPillH - 5) / 2;   // 28: center the 5px label on the pill
 
@@ -465,10 +467,10 @@ public:
     IWzFontPtr m_pFont;          // basic font (light) — stack-count numerals on dark badges
     IWzFontPtr m_pFontDk;        // Dotum 11 dark — search text / bag label on the light art
 
-    // --- art / chrome bundled under UI/UIWindow.img/Bag/* (+ Basic.img/VScr4) ---
+    // --- art / chrome bundled under Custom UI/UIWindow.img/Bag/* (Satchel theme) ---
     IWzCanvasPtr m_pBg;                        // shared background art (STORAGE BAG, 5x5 grid)
-    IWzCanvasPtr m_pTabOn[kKindCount];         // tab label glyph (white ORE/SCROLL/CHAIR/CASH), per kind
-    IWzCanvasPtr m_pPillL[2], m_pPillF[2], m_pPillR[2];  // vanilla Basic.img/Tab2 9-slice: [0]=grey(unsel) [1]=pink(sel)
+    IWzCanvasPtr m_pTabLabel[2][kKindCount];   // tab label glyphs [0]=inactive (tan) [1]=active (brown), per kind
+    IWzCanvasPtr m_pPillL[2], m_pPillF[2], m_pPillR[2];  // tab pill 3-slice: [0]=leather(unsel) [1]=parchment(sel)
     IWzCanvasPtr m_pBtClose[2];               // close button: normal, mouseOver
     IWzCanvasPtr m_pBtSort[3];                // sort/merge button: vanilla red BtSort (normal, pressed, mouseOver)
     IWzCanvasPtr m_pBtAuto[2][3];             // AUTO button [off,on][normal, pressed, mouseOver]
@@ -522,7 +524,7 @@ public:
         if (dst && src)
             try { dst->CopyEx(x, y, src, CANVAS_ALPHATYPE::CA_OVERWRITE, 0, 0, 0, 0, 0, 0); } catch (...) {}
     }
-    // Draw a vanilla 9-slice tab pill (Basic.img/Tab2) at window-local x, total width W: left cap +
+    // Draw a 3-slice tab pill (Bag/tab) at window-local x, total width W: left cap +
     // horizontally-stretched fill + right cap. sel picks the pink (selected) vs grey (unselected) set.
     void DrawTabPill(IWzCanvasPtr dst, int x, int W, bool sel) {
         IWzCanvasPtr L = m_pPillL[sel ? 1 : 0];
@@ -539,17 +541,17 @@ public:
     }
     void LoadSprites() {
         m_pBg          = LoadSprite(L"Custom/UI/UIWindow.img/Bag/backgrnd");
-        m_pTabOn[0]    = LoadSprite(L"Custom/UI/UIWindow.img/Bag/tabOre");
-        m_pTabOn[1]    = LoadSprite(L"Custom/UI/UIWindow.img/Bag/tabScroll");
-        m_pTabOn[2]    = LoadSprite(L"Custom/UI/UIWindow.img/Bag/tabChair");
-        m_pTabOn[3]    = LoadSprite(L"Custom/UI/UIWindow.img/Bag/tabCash");
-        // Vanilla pink/grey tab pill (shared Basic.img/Tab2 9-slice) — the item-inventory tab look.
-        m_pPillL[0]    = LoadSprite(L"UI/Basic.img/Tab2/left0");
-        m_pPillL[1]    = LoadSprite(L"UI/Basic.img/Tab2/left1");
-        m_pPillF[0]    = LoadSprite(L"UI/Basic.img/Tab2/fill0");
-        m_pPillF[1]    = LoadSprite(L"UI/Basic.img/Tab2/fill1");
-        m_pPillR[0]    = LoadSprite(L"UI/Basic.img/Tab2/right0");
-        m_pPillR[1]    = LoadSprite(L"UI/Basic.img/Tab2/right1");
+        for (int on = 0; on < 2; ++on) {
+            const wchar_t* st = on ? L"on" : L"off";
+            wchar_t path[80];
+            for (int k = 0; k < kKindCount; ++k) {
+                swprintf(path, 80, L"Custom/UI/UIWindow.img/Bag/label/%s/%d", st, k);
+                m_pTabLabel[on][k] = LoadSprite(path);
+            }
+            swprintf(path, 80, L"Custom/UI/UIWindow.img/Bag/tab/%s/left", st);  m_pPillL[on] = LoadSprite(path);
+            swprintf(path, 80, L"Custom/UI/UIWindow.img/Bag/tab/%s/fill", st);  m_pPillF[on] = LoadSprite(path);
+            swprintf(path, 80, L"Custom/UI/UIWindow.img/Bag/tab/%s/right", st); m_pPillR[on] = LoadSprite(path);
+        }
         m_pBtClose[0]  = LoadSprite(L"Custom/UI/UIWindow.img/Bag/BtClose/normal/0");
         m_pBtClose[1]  = LoadSprite(L"Custom/UI/UIWindow.img/Bag/BtClose/mouseOver/0");
         // stock item-inventory sort icon, 12x12 (v83 has no Android node; CopyEx blits by top-left, ignoring origin)
@@ -566,10 +568,10 @@ public:
             }
         }
         // vanilla blue scrollbar (always present in Basic.img)
-        m_pSbPrev[0]  = LoadSprite(L"UI/Basic.img/VScr4/enabled/prev0");
-        m_pSbNext[0]  = LoadSprite(L"UI/Basic.img/VScr4/enabled/next0");
-        m_pSbBase     = LoadSprite(L"UI/Basic.img/VScr4/enabled/base");
-        m_pSbThumb[0] = LoadSprite(L"UI/Basic.img/VScr4/enabled/thumb0");
+        m_pSbPrev[0]  = LoadSprite(L"Custom/UI/UIWindow.img/Bag/scroll/prev");
+        m_pSbNext[0]  = LoadSprite(L"Custom/UI/UIWindow.img/Bag/scroll/next");
+        m_pSbBase     = LoadSprite(L"Custom/UI/UIWindow.img/Bag/scroll/base");
+        m_pSbThumb[0] = LoadSprite(L"Custom/UI/UIWindow.img/Bag/scroll/thumb");   // 15x25, 6px caps (3-sliced in Draw)
         // vanilla stack-count digits (white glyph + black outline -> readable on any cell)
         for (int i = 0; i < 10; ++i) {
             wchar_t dp[48]; swprintf(dp, 48, L"UI/Basic.img/ItemNo/%d", i);
@@ -853,7 +855,7 @@ CUIBagWindow::CUIBagWindow(int initialKind, int nLeft, int nTop)
         if (m_pFontDk) {
             HRESULT hr = reinterpret_cast<HRESULT(__thiscall*)(IWzFont*, Ztl_bstr_t, unsigned long,
                 unsigned long, const Ztl_variant_t&)>(kAddr_SetFont)(
-                m_pFontDk, L"Dotum", 11, 0xFF202020, Ztl_variant_t(L""));
+                m_pFontDk, L"Dotum", 11, kSatchelInk, Ztl_variant_t(L""));
             if (FAILED(hr)) m_pFontDk = nullptr;
         }
     } catch (...) { m_pFontDk = nullptr; }
@@ -873,7 +875,7 @@ void CUIBagWindow::OnDestroy() {
     if (m_bTtInit) { __try { TT_Dtor(m_ttBuf); } __except (EXCEPTION_EXECUTE_HANDLER) {} m_bTtInit = false; }
     m_pFont = nullptr; m_pFontDk = nullptr;
     m_pBg = nullptr;
-    for (int k = 0; k < kKindCount; ++k) m_pTabOn[k] = nullptr;
+    for (int on = 0; on < 2; ++on) for (int k = 0; k < kKindCount; ++k) m_pTabLabel[on][k] = nullptr;
     for (int i = 0; i < 2; ++i) { m_pPillL[i] = nullptr; m_pPillF[i] = nullptr; m_pPillR[i] = nullptr; }
     m_pBtClose[0] = nullptr; m_pBtClose[1] = nullptr;
     m_pBtSort[0] = nullptr; m_pBtSort[1] = nullptr; m_pBtSort[2] = nullptr;
@@ -882,6 +884,24 @@ void CUIBagWindow::OnDestroy() {
     for (int i = 0; i < 10; ++i) m_pDigit[i] = nullptr;
     if (ms_pInstance == this) ms_pInstance = nullptr;
     CWnd::OnDestroy();
+}
+
+// Pixel width of `s` in `font`. A trailing space is added by hand in case the measure trims it,
+// so the caret still advances after typing one.
+static int TextWidth(IWzFont* font, const char* s) {
+    if (!font || !s || !*s) return 0;
+    int w = 0;
+    try { w = (int)font->CalcTextWidth(Ztl_bstr_t(s), Ztl_variant_t()); } catch (...) { return 0; }
+    size_t n = strlen(s);
+    if (s[n - 1] == ' ') {
+        try {
+            int wTrim = (int)font->CalcTextWidth(Ztl_bstr_t("a a"), Ztl_variant_t())
+                      - (int)font->CalcTextWidth(Ztl_bstr_t("aa"), Ztl_variant_t());
+            int wLast = w - (int)font->CalcTextWidth(Ztl_bstr_t(std::string(s, n - 1).c_str()), Ztl_variant_t());
+            if (wLast <= 0) w += wTrim;   // the measure dropped the trailing space
+        } catch (...) {}
+    }
+    return w;
 }
 
 void CUIBagWindow::Draw(const RECT* pRect) {
@@ -917,7 +937,11 @@ void CUIBagWindow::Draw(const RECT* pRect) {
     for (int k = 0; k < kKindCount; ++k) {
         bool sel = (k == m_activeKind);
         DrawTabPill(pCanvas, kTabHitLeft[k] + kPillPad, (kTabHitRight[k] - kTabHitLeft[k]) - 2 * kPillPad, sel);
-        BlitA(pCanvas, m_pTabOn[k], kTabLabelX[k], kTabLabelY);
+        // label centred in its slot; inactive pills sit 2px lower, so their label drops 1px
+        IWzCanvasPtr lab = m_pTabLabel[sel ? 1 : 0][k];
+        int lw = 0;
+        try { if (lab) lw = (int)lab->width; } catch (...) {}
+        BlitA(pCanvas, lab, kTabHitLeft[k] + ((kTabHitRight[k] - kTabHitLeft[k]) - lw) / 2, kTabLabelY + (sel ? 0 : 1));
     }
 
     // (2) Item icons over the baked grid cells, with the per-slot stack count drawn
@@ -997,14 +1021,15 @@ void CUIBagWindow::Draw(const RECT* pRect) {
         }
         // caret (blink ~500ms) right after the text
         if (m_searchActive && ((GetTickCount() / 500) & 1) == 0) {
-            int cx = kSearchTextX + m_searchLen * 6;
-            pCanvas->DrawRectangle(cx, kSearchTextY, 1, 12, 0xFF202020);
+            int cx = kSearchTextX + TextWidth(pfDk, m_search) + 1;   // measured: Dotum is proportional
+            pCanvas->DrawRectangle(cx, kSearchTextY, 1, 12, kSatchelInk);
         }
         // result-count badge when filtering
         if (Filtering()) {
             char cnt[16]; _snprintf(cnt, sizeof(cnt), "%d", m_displayCount); cnt[15] = 0;
-            int cw = (int)strlen(cnt) * 6;
-            try { pCanvas->DrawTextA(kSearchBoxR - cw - 6, kSearchTextY, Ztl_bstr_t(cnt), pfDk, Ztl_variant_t(), Ztl_variant_t()); } catch (...) {}
+            int cw = TextWidth(pfDk, cnt);
+            // left of the baked magnifier
+            try { pCanvas->DrawTextA(kSearchBoxR - cw - 20, kSearchTextY, Ztl_bstr_t(cnt), pfDk, Ztl_variant_t(), Ztl_variant_t()); } catch (...) {}
         }
     }
 }

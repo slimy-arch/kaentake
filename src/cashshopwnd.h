@@ -12,7 +12,8 @@ class CInPacket;
 
 // Custom opcode pair, this project 0x372x block. The block was full through 0x372F
 // (BAG_WINDOW 0x3724/5, SET_ITEM 0x3726/7, EQUIP_ROLL 0x3728/9, GACHAPON 0x372A,
-// BEAUTY 0x372C/D, WEAPON_TINT 0x372E/F), so this is the next free pair under the
+// BEAUTY 0x372C/D, WEAPON_TINT 0x372E/F -- the Coloring Prism, in use: see
+// kWeaponTintActionOpcode / kWeaponTintSyncOpcode in weapontint.h), so this is the next free pair under the
 // even = request / odd = reply convention. 0x372B is free but odd and so cannot be
 // a CP. Server halves are net.opcodes.RecvOpcode.CASHSHOP_WINDOW_ACTION /
 // SendOpcode.CASHSHOP_WINDOW_SYNC — equal only by convention, nothing enforces it,

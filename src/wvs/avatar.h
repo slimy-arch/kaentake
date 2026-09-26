@@ -4,18 +4,25 @@
 #include <windows.h>
 
 
+// v83 equip-slot count. AvatarLook::operator= (0x00451541) copies the tail as three loops:
+// `push 0x34` (52) from +0x19, `push 0x34` from +0xE9, `push 3` from +0x1B9, so the struct ends
+// at 0x1C5 -- corroborated at 0x004515D5 by `push 0x1c5`, the memcmp length between the two
+// AvatarLooks at CAvatar+4 and CAvatar+0x1C9. (The [60]/0x205 upstream declaration is
+// self-consistent but wrong: loops over it ran 8 entries into anUnseenEquip.)
+#define AVATAR_EQUIP_SLOTS 52
+
 #pragma pack(push, 1)
 struct AvatarLook : public ZRefCounted {
-    unsigned char nGender;
-    int nSkin;
-    int nFace;
-    int nWeaponStickerID;
-    int anHairEquip[60];
-    int anUnseenEquip[60];
-    int anPetID[3];
+    unsigned char nGender;                  // +0x0C
+    int nSkin;                              // +0x0D
+    int nFace;                              // +0x11
+    int nWeaponStickerID;                   // +0x15
+    int anHairEquip[AVATAR_EQUIP_SLOTS];    // +0x19
+    int anUnseenEquip[AVATAR_EQUIP_SLOTS];  // +0xE9
+    int anPetID[3];                         // +0x1B9
 };
 #pragma pack(pop)
-static_assert(sizeof(AvatarLook) == 0x205);
+static_assert(sizeof(AvatarLook) == 0x1C5);
 
 
 struct USERLAYER {
@@ -37,10 +44,12 @@ struct ITEMEFFECTLAYER {
     int nAction;
     int bFlip;
     USERLAYER l;
+    unsigned int uTintKey;   // Coloring Prism effect tint the layer was built with (WeaponTint::Key)
 
     void Reset() {
         nItemID = 0;
         nAction = 0;
+        uTintKey = 0;
         l.pLayer = nullptr;
     }
 };
@@ -52,7 +61,7 @@ public:
         int bBlinking;
         POINT ptBodyRelMove;
         int nRidingChairID;
-        ITEMEFFECTLAYER aItemEffectLayer[60];
+        ITEMEFFECTLAYER aItemEffectLayer[AVATAR_EQUIP_SLOTS];   // one per anHairEquip slot
     };
 
     virtual ~CAvatar() = 0;

@@ -2,6 +2,7 @@
 #include "hook.h"
 #include "debug.h"
 #include "damageskin.h"
+#include "coloringprism.h"
 #include "wvs/iteminfo.h"
 #include "wvs/util.h"
 #include "wvs/wnd.h"
@@ -1382,6 +1383,11 @@ static auto CWvsContext__SendConsumeCashItemUseRequest =
 void __fastcall CWvsContext__SendConsumeCashItemUseRequest_hook_picker(
     CWvsContext* pThis, void* /*edx*/, int nPOS, int nItemID, int a4, ZXString<char> a5)
 {
+    // This hook owns 0x00A0A63F, so the Coloring Prism (5782000) is dispatched from here rather
+    // than Detouring it a second time. Swallowed: the server consumes the prism on confirm.
+    if (ColorPrism_OnConsumeCashUse(nPOS, nItemID)) {
+        return;
+    }
     if (nItemID != kCashItem_DamageSkin) {
         CWvsContext__SendConsumeCashItemUseRequest(pThis, nPOS, nItemID, a4, a5);
         return;
@@ -1478,6 +1484,9 @@ int __fastcall CWndMan__ProcessKey_hook(
 
 int32_t __cdecl get_consume_cash_item_type_hook_picker(int32_t nItemID) {
     if (nItemID == kCashItem_DamageSkin) return 1;
+    // Coloring Prism (group 578, outside the stock 500..561 table): nonzero or the double-click
+    // is dropped before any use request exists. Dispatched here; this hook owns 0x004863D5.
+    if (const int nPrismType = ColorPrism_ConsumeCashItemType(nItemID)) return nPrismType;
     return get_consume_cash_item_type_picker(nItemID);
 }
 

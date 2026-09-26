@@ -5,6 +5,7 @@
 #include "damageskin.h"
 #include "cashshopwnd.h"
 #include "storagebag.h"
+#include "weapontint.h"
 #include "wvs/packet.h"
 
 // Central inbound dispatcher for custom server -> client opcodes. Add new custom packets here rather
@@ -51,6 +52,9 @@ static void __fastcall CClientSocket__ProcessPacket_hook(void* pThis, void* _EDX
         return;
     case kStorageBagSnapshotOpcode: // Server SendOpcode.BAG_WINDOW; handler skips the opcode itself
         StorageBag_HandlePacket(pPacket);
+        return;
+    case kWeaponTintSyncOpcode: // Server SendOpcode.WEAPON_TINT_SYNC; handler skips the opcode itself (+2)
+        WeaponTint_HandleSync(pPacket);
         return;
     case LP_MONSTER_BOOK_RESULT:
         // byte type: 0 drop table (drops module), 1 item hits / 2 droppers (search module). Both only

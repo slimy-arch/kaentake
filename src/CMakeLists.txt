@@ -24,6 +24,8 @@ add_library(injector SHARED
     damagerankinput.cpp
     damageskin.cpp
     damageskinpicker.cpp
+    coloringprism.cpp
+    weapontint.cpp
     cashshopwnd.cpp
     storagebag.cpp
     inventorynx.cpp

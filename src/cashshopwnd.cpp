@@ -47,6 +47,7 @@
 #include "debug.h"
 #include "cashshopwnd.h"
 #include "storagebag.h"
+#include "coloringprism.h"
 #include "clientsocket.h"
 
 #include "wvs/iteminfo.h"
@@ -3679,7 +3680,9 @@ void CashShopWnd_HandleSync(CInPacket* pPacket) {
 // =====================================================
 // CWvsContext::TryCloseUI — v95 sym, v83 VA 0x00A06E55 (ret 4). Stock returns 0 for any
 // window it does not know, which makes Esc open the game menu instead of closing us.
-// The storage bag (storagebag.cpp) shares this one detour.
+// The storage bag (storagebag.cpp) and the Coloring Prism window (coloringprism.cpp) share
+// this one detour: each exposes a <Feature>_TryCloseUI(pWnd) that closes and returns true only
+// when pWnd is its own window.
 static auto CWvsContext__TryCloseUI =
     reinterpret_cast<int(__thiscall*)(void*, void*)>(CashShopWnd::kAddr_TryCloseUI);
 
@@ -3690,6 +3693,9 @@ static int __fastcall CWvsContext__TryCloseUI_hook(void* pThis, void* _EDX, void
         return 1;
     }
     if (StorageBag_TryCloseUI(pWnd)) {
+        return 1;
+    }
+    if (ColorPrism_TryCloseUI(pWnd)) {
         return 1;
     }
     return CWvsContext__TryCloseUI(pThis, pWnd);

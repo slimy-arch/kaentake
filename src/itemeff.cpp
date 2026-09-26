@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "hook.h"
+#include "weapontint.h"
 #include "wvs/avatar.h"
 #include "wvs/iteminfo.h"
 #include "wvs/util.h"
@@ -46,19 +47,26 @@ int __fastcall CItemInfo__IterateItemInfo_hook(CItemInfo* pThis, void* _EDX) {
 
 void UpdateItemEff(CUser* pUser) {
     CAvatar* pAvatar = &pUser->m_CAvatar;
-    for (auto i = 0; i < 60; ++i) {
+    // AVATAR_EQUIP_SLOTS (52), not 60: a 60-entry loop ran 8 slots into anUnseenEquip and
+    // rendered the effects of equips hidden under cash items.
+    for (auto i = 0; i < AVATAR_EQUIP_SLOTS; ++i) {
         int nItemID = pAvatar->m_avatarLook.anHairEquip[i];
         auto pItemEffectLayer = &pAvatar->m_pCustomData->aItemEffectLayer[i];
         if (auto search = g_mPropItemEffect.find(nItemID); search != g_mPropItemEffect.end()) {
             int bFlip = pAvatar->m_pLayerUnderFace->flip;
             int nAction = pAvatar->GetCurrentAction(nullptr);
+            // The Coloring Prism tint is part of the cache key: a recolour changes none of
+            // item / action / flip, so without it the new colour waited for the next turn.
+            const unsigned int uTintKey = WeaponTint_ItemEffTintKey(pAvatar, nItemID);
             if (pItemEffectLayer->nItemID == nItemID && pItemEffectLayer->nAction == nAction &&
-                (!pItemEffectLayer->l.bFixed && pItemEffectLayer->bFlip == bFlip)) {
+                (!pItemEffectLayer->l.bFixed && pItemEffectLayer->bFlip == bFlip) &&
+                pItemEffectLayer->uTintKey == uTintKey) {
                 continue;
             }
             pItemEffectLayer->nItemID = nItemID;
             pItemEffectLayer->nAction = nAction;
             pItemEffectLayer->bFlip = bFlip;
+            pItemEffectLayer->uTintKey = uTintKey;
 
             // resolve UOL
             Ztl_bstr_t sActionName;
@@ -69,8 +77,19 @@ void UpdateItemEff(CUser* pUser) {
             wchar_t sUOL[1024];
             swprintf(sUOL, 1024, L"Effect/ItemEff.img/%d/effect/%ls", nItemID, vAction.vt == VT_EMPTY ? L"default" : sActionName.GetBSTR());
 
-            // load layer and animate
-            if (pUser->LoadLayer(sUOL, bFlip, pItemEffectLayer->l, nullptr)) {
+            // load layer and animate. The Coloring Prism swap brackets ONLY the load (the
+            // layer keeps refs to the tinted clones); End must run whenever Begin did, even
+            // if LoadLayer throws, or a tinted clone stays in the shared WZ tree.
+            WeaponTint_BeginItemEffSwap(pAvatar, nItemID);
+            int bLoaded = 0;
+            try {
+                bLoaded = pUser->LoadLayer(sUOL, bFlip, pItemEffectLayer->l, nullptr);
+            } catch (...) {
+                WeaponTint_EndItemEffSwap();
+                throw;
+            }
+            WeaponTint_EndItemEffSwap();
+            if (bLoaded) {
                 pItemEffectLayer->l.pLayer->Animate(GA_REPEAT);
             }
         } else {

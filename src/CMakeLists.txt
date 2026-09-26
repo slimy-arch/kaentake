@@ -34,6 +34,8 @@ add_library(injector SHARED
     quickslotdlg.cpp
     magicdmg.cpp
     critrouting.cpp
+    damagelong.cpp
+    statuncap.cpp
     critratedisplay.cpp
     statdetaillayout.cpp
     statuilayout.cpp

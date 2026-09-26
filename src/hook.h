@@ -82,6 +82,8 @@ void AttachLongKeyboardMod();
 void AttachQuickslotDlgMod();
 void AttachMagicDamageMod();
 void AttachCritRoutingMod();
+void AttachDamageLongMod();     // damagelong.cpp: 199,999 -> 64-bit lines, int+long attack packets
+void AttachStatUncapMod();      // statuncap.cpp: 1999/999 stat clamps -> 851,711
 void AttachStatDetailLayoutMod();
 void AttachStatUiLayoutMod();
 void AttachStorageBagMod();
@@ -138,6 +140,8 @@ inline void AttachClientHooks() {
     AttachQuickslotDlgMod();
     AttachMagicDamageMod();
     AttachCritRoutingMod();
+    AttachDamageLongMod();
+    AttachStatUncapMod();
     AttachStatDetailLayoutMod();
     AttachStatUiLayoutMod();
     AttachStorageBagMod();

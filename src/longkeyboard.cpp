@@ -89,6 +89,23 @@ void __declspec(naked) CacheMemset_hook() {
     }
 }
 
+// CUIStatusBar::DrawSkillCooltime (0x008E0634), skill-slot branch: esi = CWvsContext character data, fetched
+// at 0x008E0755 and passed to the skill lookup at 0x008E079F. On relog it can be null while the slot cache
+// still marks the slot as a skill, and the lookup reads [0+0x467+4]. Skip the slot, as the lookup-failed jle does.
+static auto CooltimeCharData_ret = 0x008E076E;
+static auto CooltimeCharData_skip = 0x008E0990;
+void __declspec(naked) CooltimeCharData_hook() {
+    __asm {
+        test    esi, esi
+        jz      skip
+        mov     edi, [edi]                              ; replaced: mov edi,[edi]
+        and     dword ptr [ebp-14h], 0                  ; replaced: and [ebp-14h],0
+        jmp     [ CooltimeCharData_ret ]
+    skip:
+        jmp     [ CooltimeCharData_skip ]
+    }
+}
+
 // Replace an lea/add with "mov reg, imm32" (5 bytes) and nop the rest of the original instruction(s).
 static void PatchMovImm(uintptr_t uAddress, unsigned char uOpcode, uintptr_t uValue, size_t uSize) {
     Patch1(uAddress, uOpcode);
@@ -142,6 +159,8 @@ void AttachLongKeyboardMod() {
     PatchMovImm(0x008E069D, 0xBE, reinterpret_cast<uintptr_t>(g_anQsCooltime), 6); // DrawSkillCooltime lea esi,[ebx+0DC4h] -> mov esi,cooltime
     PatchMovImm(0x008E06A3, 0xBF, uCache + 1, 6);          // DrawSkillCooltime lea edi,[ebx+0D21h] -> mov edi,cache+1
     Patch1(0x008E099F + 3, kSlots);                        // DrawSkillCooltime cmp [ebp-1Ch],8 -> 26
+    PatchJmp(0x008E0768, &CooltimeCharData_hook);          // DrawSkillCooltime mov edi,[edi]; and [ebp-14h],0: null char data guard (relog crash)
+    PatchNop(0x008E0768 + 5, 0x008E076E);                  // ... rest of the and
 
     // Slot positions: s_ptShortKeyPos 0x00BE2DB0 -> g_aShortKeyPos
     Patch1(0x008DE941 + 2, kSlots);                        // CQuickSlot::GetPosByIndex cmp eax,8 -> 26

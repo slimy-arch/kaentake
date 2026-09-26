@@ -2,6 +2,7 @@
 #include "hook.h"
 #include "ztl/ztl.h"        // IWzCanvas / IWzFont / Ztl_bstr_t / Ztl_variant_t
 #include "wvs/packet.h"     // CInPacket (the NX packet)
+#include "cashshopwnd.h"     // CashShopWnd_SetNxCredit (the Cash Shop window shows the same value)
 
 #include <cstdio>
 
@@ -10,7 +11,8 @@
 // match and draws the character's NX Credit into that box, right-aligned like the meso value.
 //
 // The client never knows NX outside the cash shop, so the value comes from the server:
-// SendOpcode.INVENTORY_CASH (0x3741), one int = NX Credit (CashShop.NX_CREDIT). The server sends
+// SendOpcode.INVENTORY_CASH (0x3741), one long = NX Credit (CashShop.NX_CREDIT, up to
+// GameConstants.MAX_NX_CREDIT = 9,999,999,999,999, the meso ceiling). The server sends
 // it on every map entry and after every NX change.
 
 namespace {
@@ -43,14 +45,15 @@ constexpr uintptr_t kAddr_CUIItem_Instance = 0x00BED654;
 auto kInvalidateRect = reinterpret_cast<void(__thiscall*)(void*, const RECT*)>(0x009E04C9);
 
 bool g_bNxKnown = false;                // blank until the first packet (it arrives on field entry)
-int  g_nNxCredit = 0;
+long long g_nNxCredit = 0;
 
 // "1,234,567", as format_integer(…, bComma=1) prints mesos.
-void FormatWithCommas(int nValue, char* sOut, size_t uSize) {
-    char sDigits[16];
+void FormatWithCommas(long long nValue, char* sOut, size_t uSize) {
+    char sDigits[24];
     const bool bNeg = nValue < 0;
-    unsigned int u = bNeg ? 0u - static_cast<unsigned int>(nValue) : static_cast<unsigned int>(nValue);
-    int n = std::snprintf(sDigits, sizeof(sDigits), "%u", u);
+    const unsigned long long u = bNeg ? 0ull - static_cast<unsigned long long>(nValue)
+                                      : static_cast<unsigned long long>(nValue);
+    int n = std::snprintf(sDigits, sizeof(sDigits), "%llu", u);
     size_t o = 0;
     if (bNeg && o + 1 < uSize) sOut[o++] = '-';
     for (int i = 0; i < n && o + 1 < uSize; ++i) {
@@ -110,8 +113,9 @@ bool IsCallTo(uintptr_t uAddress, uintptr_t uTarget) {
 // opcode is skipped here.
 void InventoryNx_HandlePacket(CInPacket* pPacket) {
     pPacket->Decode<unsigned short>();
-    g_nNxCredit = pPacket->Decode<int>();
+    g_nNxCredit = pPacket->Decode<long long>();   // writeLong since the NX uncap
     g_bNxKnown = true;
+    CashShopWnd_SetNxCredit(g_nNxCredit);
     // CUIItem::Draw runs only when the window is invalidated, so an open inventory would keep the
     // old value until something else repainted it. ProcessPacket runs on the main thread.
     void* pInventory = *reinterpret_cast<void**>(kAddr_CUIItem_Instance);

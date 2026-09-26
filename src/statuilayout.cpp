@@ -8,8 +8,8 @@
 //
 //   Stat/backgrnd   279 x 365  (stock 176 x 348). Adds a REBIRTH row at y=186, so every
 //                   row from ABILITY POINT down sits 18px (one row) lower than stock.
-//   Stat/backgrnd2  260 x 149  (stock 177 x 203). Two columns; statdetaillayout.cpp
-//                   moves the values into it.
+//   Stat/backgrnd2  260 x 185  (stock 177 x 203). Two columns, eight rows;
+//                   statdetaillayout.cpp moves the values into it.
 //
 // Rows NAME..FAME are unchanged (values at y 33..169 on plates 32..168). Right-edge
 // controls keep their stock inset from the right border: +103 on a 279-wide skin.
@@ -32,11 +32,11 @@ constexpr int kRightShift = 103;         // kMainWidth - stock 176
 
 // CUIStatDetail geometry — must match Stat/backgrnd2.
 constexpr int kDetailWidth  = 260;
-constexpr int kDetailHeight = 149;
+constexpr int kDetailHeight = 185;
 // Panel corner relative to CUIStat: X = mainWidth - 5 merges the two frames exactly as
 // stock 170 does on a 175-wide skin; Y = mainHeight - detailHeight bottom-aligns them.
 constexpr int kDetailX = kMainWidth - 5;               // 274
-constexpr int kDetailY = kMainHeight - kDetailHeight;  // 216
+constexpr int kDetailY = kMainHeight - kDetailHeight;  // 180
 
 struct Imm32Site {
     uintptr_t   uAddress;    // address of the imm32 itself

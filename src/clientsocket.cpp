@@ -11,10 +11,12 @@
 
 constexpr unsigned short LP_WORLD_MAP_PLAYERS = 0x178; // Server SendOpcode.WORLD_MAP_PLAYERS
 constexpr unsigned short LP_DAMAGE_RANK = 0x3714;      // Server SendOpcode.DPT_TRACKER
+constexpr unsigned short LP_STAT_DETAIL_RATES = 0x3740; // Server SendOpcode.STAT_DETAIL_RATES
 
 namespace players {
 void HandleResponse(CInPacket* pPacket); // worldmapinfo.cpp
 }
+void StatDetail_HandleRatesPacket(CInPacket* pPacket); // statdetaillayout.cpp
 
 // CClientSocket::ProcessPacket — v95 sym, v83 VA 0x004965F1 (ret 4). The opcode sits at the packet's
 // current offset (the original starts with Decode2), which is not necessarily 0.
@@ -33,6 +35,9 @@ static void __fastcall CClientSocket__ProcessPacket_hook(void* pThis, void* _EDX
     case damageskin::LP_RESULT:
     case damageskin::LP_BROADCAST:
         damageskin::HandlePacket(pPacket);
+        return;
+    case LP_STAT_DETAIL_RATES: // handler skips the opcode itself
+        StatDetail_HandleRatesPacket(pPacket);
         return;
     case kCashShopSyncOpcode: // Server SendOpcode.CASHSHOP_WINDOW_SYNC; handler skips the opcode itself
         CashShopWnd_HandleSync(pPacket);

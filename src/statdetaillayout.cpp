@@ -3,6 +3,7 @@
 #include "critmodel.h"
 #include "magicdmg.h"       // MagicDmg_GetRange
 #include "ztl/ztl.h"        // IWzCanvas / IWzFont / Ztl_bstr_t / Ztl_variant_t
+#include "wvs/packet.h"     // CInPacket (the rates packet)
 
 #include <intrin.h>
 #include <cstdio>
@@ -42,7 +43,23 @@ constexpr uintptr_t kOff_AttackRateCheck  = 0x0770;
 // box up with the plate's centre exactly as the old single-column art did.
 constexpr int kColLeft  = 80;
 constexpr int kColRight = 202;
-constexpr int kRow1 = 8, kRow2 = 26, kRow3 = 44, kRow4 = 62, kRow5 = 80, kRow6 = 98;
+// Stat/backgrnd2 is 260 x 185, eight rows:
+//   1 RANGE                     5 ACCURACY      | EVASION
+//   2 WEAPON ATK.  | MAGIC ATK. 6 CRITICAL RATE | CRITICAL DAM.
+//   3 NORMAL DMG   | BOSS DMG   7 DROP RATE     | MESO RATE
+//   4 WEAPON DEF.  | MAGIC DEF. 8 SPEED         | JUMP
+constexpr int kRow1 = 8, kRow2 = 26, kRow3 = 44, kRow4 = 62, kRow5 = 80, kRow6 = 98,
+              kRow7 = 116, kRow8 = 134;
+
+// Server-side values for rows 3 and 7, from SendOpcode.STAT_DETAIL_RATES (0x3740):
+// int drop %, int meso %, int normal-monster damage %, int boss damage %.
+// Only the server knows them (world rate x coupons x buffs x equipment), so the
+// cells read "-" until the first packet arrives.
+bool g_bRatesKnown       = false;
+int  g_nDropRatePercent  = 0;
+int  g_nMesoRatePercent  = 0;
+int  g_nNormalDmgPercent = 0;
+int  g_nBossDmgPercent   = 0;
 
 // A value this file renders itself rather than taking from the client.
 enum Value {
@@ -54,14 +71,20 @@ enum Value {
     VALUE_EVASION,           // right cell of row 4 — client draws raw EVA; we override
     VALUE_RANGE,             // row 1 — magic formula for mages, physical estimate
                              // for everyone else (both 64-bit; see FormatValue)
+    VALUE_NORMAL_DAMAGE,     // left cell of row 3  — server value (placeholder 0% for now)
+    VALUE_BOSS_DAMAGE,       // right cell of row 3 — server value (placeholder 0% for now)
+    VALUE_DROP_RATE,         // left cell of row 7  — server value
+    VALUE_MESO_RATE,         // right cell of row 7 — server value
 };
+
+constexpr int kMaxExtras = 5;
 
 struct StatCell {
     uintptr_t uCallSite;     // the `call DrawTextA` we repoint
     int       nLeft;
     int       nTop;
     Value     eSelf;         // replaces the client's own string for THIS cell
-    Value     eExtra;        // an additional cell to draw while we are here
+    Value     aeExtra[kMaxExtras]; // additional cells to draw while we are here
     bool      bNarrow;       // one grid cell wide -> collapse the buffed breakdown
     const char* sWhat;       // for the guard's error text
 };
@@ -71,15 +94,18 @@ struct StatCell {
 // RANGE is the one wide cell: row 1's right half is empty in the art, so its
 // "min ~ max" string has the full panel to run into.
 const StatCell kCells[] = {
-    { 0x008C3412, kColLeft,  kRow1, VALUE_RANGE,     VALUE_WEAPON_ATTACK, false, "range"      },
-    { 0x008C35DB, kColLeft,  kRow3, VALUE_NONE,      VALUE_NONE,          true,  "weapon def" },
-    { 0x008C375C, kColRight, kRow2, VALUE_NONE,      VALUE_NONE,          true,  "magic atk"  },
-    { 0x008C39FB, kColRight, kRow3, VALUE_NONE,      VALUE_NONE,          true,  "magic def"  },
-    { 0x008C3BAE, kColLeft,  kRow4, VALUE_NONE,      VALUE_NONE,          true,  "accuracy"   },
-    { 0x008C3D61, kColRight, kRow4, VALUE_NONE,      VALUE_NONE,          true,  "evasion"    },
-    { 0x008C3FA0, kColLeft,  kRow5, VALUE_CRIT_RATE, VALUE_CRIT_DAMAGE,   true,  "crit rate"  },
-    { 0x008C436F, kColLeft,  kRow6, VALUE_NONE,      VALUE_NONE,          true,  "speed"      },
-    { 0x008C4459, kColRight, kRow6, VALUE_NONE,      VALUE_NONE,          true,  "jump"       },
+    // The cells the client has no draw for ride on the RANGE draw, which runs every frame.
+    { 0x008C3412, kColLeft,  kRow1, VALUE_RANGE,     { VALUE_WEAPON_ATTACK, VALUE_NORMAL_DAMAGE,
+                                                       VALUE_BOSS_DAMAGE, VALUE_DROP_RATE,
+                                                       VALUE_MESO_RATE },  false, "range"      },
+    { 0x008C35DB, kColLeft,  kRow4, VALUE_NONE,      {},                   true,  "weapon def" },
+    { 0x008C375C, kColRight, kRow2, VALUE_NONE,      {},                   true,  "magic atk"  },
+    { 0x008C39FB, kColRight, kRow4, VALUE_NONE,      {},                   true,  "magic def"  },
+    { 0x008C3BAE, kColLeft,  kRow5, VALUE_NONE,      {},                   true,  "accuracy"   },
+    { 0x008C3D61, kColRight, kRow5, VALUE_NONE,      {},                   true,  "evasion"    },
+    { 0x008C3FA0, kColLeft,  kRow6, VALUE_CRIT_RATE, { VALUE_CRIT_DAMAGE }, true,  "crit rate"  },
+    { 0x008C436F, kColLeft,  kRow8, VALUE_NONE,      {},                   true,  "speed"      },
+    { 0x008C4459, kColRight, kRow8, VALUE_NONE,      {},                   true,  "jump"       },
 };
 
 const StatCell* FindCell(uintptr_t uReturnAddress) {
@@ -331,6 +357,21 @@ bool FormatValue(Value eValue, char* sOut, size_t uOutChars) {
             sprintf_s(sOut, uOutChars, "%d%%", CritDisplay_GetCritDamage());
         }
         break;
+    case VALUE_NORMAL_DAMAGE:
+    case VALUE_BOSS_DAMAGE:
+    case VALUE_DROP_RATE:
+    case VALUE_MESO_RATE: {
+        if (!g_bRatesKnown) {
+            sprintf_s(sOut, uOutChars, "-");
+            break;
+        }
+        const int nPercent = eValue == VALUE_NORMAL_DAMAGE ? g_nNormalDmgPercent
+                           : eValue == VALUE_BOSS_DAMAGE   ? g_nBossDmgPercent
+                           : eValue == VALUE_DROP_RATE     ? g_nDropRatePercent
+                                                           : g_nMesoRatePercent;
+        sprintf_s(sOut, uOutChars, "%d%%", nPercent);
+        break;
+    }
     default:
         sOut[0] = 0;
         return false;
@@ -366,7 +407,11 @@ void DrawExtraCell(void* pCanvas, void* pFont, void* pVAlpha, void* pVTabOrg, Va
     int nTop = 0;
     switch (eExtra) {
     case VALUE_WEAPON_ATTACK: nLeft = kColLeft;  nTop = kRow2; break;
-    case VALUE_CRIT_DAMAGE:   nLeft = kColRight; nTop = kRow5; break;
+    case VALUE_NORMAL_DAMAGE: nLeft = kColLeft;  nTop = kRow3; break;
+    case VALUE_BOSS_DAMAGE:   nLeft = kColRight; nTop = kRow3; break;
+    case VALUE_CRIT_DAMAGE:   nLeft = kColRight; nTop = kRow6; break;
+    case VALUE_DROP_RATE:     nLeft = kColLeft;  nTop = kRow7; break;
+    case VALUE_MESO_RATE:     nLeft = kColRight; nTop = kRow7; break;
     default: return;
     }
     char sText[64];
@@ -377,6 +422,17 @@ void DrawExtraCell(void* pCanvas, void* pFont, void* pVAlpha, void* pVTabOrg, Va
 }
 
 } // namespace
+
+// SendOpcode.STAT_DETAIL_RATES (0x3740). Routed from clientsocket.cpp, which only Peek2s,
+// so the opcode is skipped here.
+void StatDetail_HandleRatesPacket(CInPacket* pPacket) {
+    pPacket->Decode<unsigned short>();
+    g_nDropRatePercent  = pPacket->Decode<int>();
+    g_nMesoRatePercent  = pPacket->Decode<int>();
+    g_nNormalDmgPercent = pPacket->Decode<int>();
+    g_nBossDmgPercent   = pPacket->Decode<int>();
+    g_bRatesKnown = true;
+}
 
 // __fastcall so ECX carries the canvas (the sites call __thiscall) and the six
 // stack args are callee-cleaned, matching DrawTextA's `ret 0x18`.
@@ -431,8 +487,10 @@ unsigned int __fastcall StatDetailDrawText_hook(void* pCanvas, void* /*edx*/, in
                                 pText, pFont, pVAlpha, pVTabOrg);
     }
 
-    if (pCell->eExtra != VALUE_NONE) {
-        DrawExtraCell(pCanvas, pFont, pVAlpha, pVTabOrg, pCell->eExtra);
+    for (Value eExtra : pCell->aeExtra) {
+        if (eExtra != VALUE_NONE) {
+            DrawExtraCell(pCanvas, pFont, pVAlpha, pVTabOrg, eExtra);
+        }
     }
     return uWidth;
 }

@@ -707,6 +707,8 @@ static int __fastcall CWorldMapDlg__OnMouseMove_hook(IUIMsgHandler* pThis, void*
 static void __fastcall CWorldMapDlg__OnDestroy_hook(void* pThis, void* _EDX) {
     ClearMapInfoToolTip();
     CWorldMapDlg__OnDestroy(pThis);
+    ClearWorldMapIconCache(); // the tooltip that drew them is gone
+
 }
 
 void AttachWorldMapInfoMod() {

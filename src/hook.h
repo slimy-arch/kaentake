@@ -71,6 +71,9 @@ void AttachLongKeyboardMod();
 void AttachQuickslotDlgMod();
 void AttachCrashLog();
 
+// stage-change cleanup, called from set_stage_hook (resolution.cpp)
+void ClearLevelShadowCache();      // maxlevel.cpp
+
 inline void AttachClientHooks() {
     AttachCrashLog();
     AttachClientBypass();

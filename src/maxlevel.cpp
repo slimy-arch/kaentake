@@ -85,6 +85,13 @@ int __cdecl get_next_level_exp_hook(int nLevel) {
 }
 
 
+// Keys are object addresses and are never erased individually, so the map grows with every decoded
+// GW_CharacterStat and a reused address can inherit a stale level. Called on entering the login
+// stage, before the character list is decoded; no stat decoded earlier is displayed after it.
+void ClearLevelShadowCache() {
+    g_mLevelByTear.clear();
+}
+
 static unsigned char __cdecl Level_Decode_Impl(void* pStat, CInPacket* pPacket) {
     int nLevel = CInPacket__Decode2(pPacket);
     g_nLevel = nLevel;

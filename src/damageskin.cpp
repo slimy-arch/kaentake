@@ -445,6 +445,10 @@ std::vector<int> g_vOwnedSkins;
 
 static std::unordered_map<int, int> g_mCharIdToSkin;
 
+void ClearDamageSkinBroadcasts() {
+    g_mCharIdToSkin.clear();
+}
+
 // CUserLocal singleton 0x00BEBF98; dwCharacterId at +0x11A8 (CUser::CUser, getter 0x007A6E53).
 static int GetLocalCharId() {
     char* pUser = *reinterpret_cast<char**>(0x00BEBF98);

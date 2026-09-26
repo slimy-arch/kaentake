@@ -177,9 +177,9 @@ using TintMap = std::unordered_map<int, WeaponTint>;
 
 std::mutex g_mtx;
 TintMap    g_saved;                       // the local player's dyed items
-// Skill body/fx keys written by AdoptOptimistic. A snapshot that omits one of the
-// pair (cap, older server, apply of the other layer) must not wipe the colour the
-// player just confirmed on the other chip.
+// Skill part keys protected by AdoptOptimistic. A snapshot that omits one of a skill's
+// parts (cap, older server, the apply of another part still in flight) must not wipe the
+// colour the player just confirmed on another part.
 std::unordered_set<int> g_protectKeys;
 WeaponTintResult g_lastResult = kTintResult_None;
 // Set by the receive thread when a snapshot actually CHANGES the tint, consumed by
@@ -369,36 +369,57 @@ struct CloneTimer {
 // The lock is still used for READING, where it is only ever asked to hand back
 // bytes it already holds -- which is the part that was verified to be coherent.
 
-// Read the whole canvas into `out` as ARGB8888. Returns false if the lock is
-// unusable, which sends the caller to the per-pixel reader.
-bool ReadPixelsLocked(IWzCanvas* pCanvas, int w, int h, uint32_t* out) {
-    CANVAS_PIXFORMAT fmt = CP_UNKNOWN;
-    __try {
-        if (FAILED(pCanvas->get_pixelFormat(&fmt))) fmt = CP_UNKNOWN;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        fmt = CP_UNKNOWN;
-    }
-    const int bpp = (fmt == CP_A8R8G8B8) ? 4 : ((fmt == CP_A4R4G4B4) ? 2 : 0);
-    if (bpp == 0) return false;
+// Is rawCanvas[][] indexed by TILE or by PIXEL?
+//
+// It matters and it cannot be assumed: under pixel indexing every (tx, ty) in a tile loop lands
+// back in the FIRST tile, so a clear reports success on every tile while only ever erasing the
+// top-left one. That is precisely how this presented -- six tiles reported ok and the pixels
+// past x = 256 survived.
+//
+// Answered by comparing the objects handed back for two indices, because that is READ ONLY.
+// The tempting probe -- ask for an out-of-range index and see if it fails -- risks being handed
+// a surface that is not there, and writing into one of those is how this area corrupted the
+// heap before. The probe index is valid under both conventions by construction.
+bool RawCanvasIndexIsTile(IWzCanvas* pCanvas, int tilesX, int tilesY) {
+    int px = 0, py = 0;
+    if (tilesX > 1)      px = 1;
+    else if (tilesY > 1) py = 1;
+    else return true;                          // one tile: the conventions agree
 
-    // The READ has the same tiling hazard, in the other direction: past the first tile it
-    // would be reading whatever follows it rather than the sprite.
-    unsigned int rtw = 0, rth = 0;
+    IWzRawCanvas* a = nullptr;
+    IWzRawCanvas* b = nullptr;
     __try {
-        if (FAILED(pCanvas->get_tileWidth(&rtw)))  rtw = 0;
-        if (FAILED(pCanvas->get_tileHeight(&rth))) rth = 0;
+        if (FAILED(pCanvas->get_rawCanvas(0, 0, &a))) a = nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        rtw = rth = 0;
+        a = nullptr;
     }
-    if (rtw && rth && (static_cast<int>(rtw) < w || static_cast<int>(rth) < h)) {
-        LOG_ONCE("weapontint: locked read refused, %dx%d canvas is tiled at %ux%u; using "
-                 "get_pixel", w, h, rtw, rth);
-        return false;
+    __try {
+        if (FAILED(pCanvas->get_rawCanvas(px, py, &b))) b = nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        b = nullptr;
     }
+    // Different objects means the index picked a different tile, so it is a tile index.
+    const bool distinct = (a && b && a != b);
+    if (a) { __try { a->Release(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+    if (b) { __try { b->Release(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+    return distinct;
+}
 
+// Copy ONE TILE's rectangle between the canvas and a caller buffer `bufW` pixels wide.
+//
+// (x0, y0) is where the tile starts in canvas pixels, `cols` x `rows` how much of it is real:
+// the last column and band of tiles are SHORT, and copying a full tile there would run off the
+// end of the allocation -- the same mistake that corrupted the heap when clone writes ignored
+// tiling. Rows advance by THIS tile's own pitch, never by the canvas width.
+//
+// `bpp` 2 is A4R4G4B4 and is only ever read; every canvas written here is one we Create()d as
+// A8R8G8B8. SEH leaf: raw COM pointers and PODs only (C2712).
+bool CopyTileLocked(IWzCanvas* pCanvas, int ix, int iy, int x0, int y0, int cols, int rows,
+                    uint32_t* buf, int bufW, int bpp, bool write) {
+    if (write && bpp != 4) return false;
     IWzRawCanvas* raw = nullptr;
     __try {
-        if (FAILED(pCanvas->get_rawCanvas(0, 0, &raw))) raw = nullptr;
+        if (FAILED(pCanvas->get_rawCanvas(ix, iy, &raw))) raw = nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         raw = nullptr;
     }
@@ -427,21 +448,23 @@ bool ReadPixelsLocked(IWzCanvas* pCanvas, int w, int h, uint32_t* out) {
     }
 
     bool ok = false;
-    if (base && pitch >= w * bpp) {
+    if (base && pitch >= cols * bpp) {
         __try {
-            for (int y = 0; y < h; ++y) {
-                const uint8_t* row = base + static_cast<size_t>(y) * pitch;
-                uint32_t* dstRow = out + static_cast<size_t>(y) * w;
-                if (bpp == 4) {
-                    memcpy(dstRow, row, static_cast<size_t>(w) * 4);
+            for (int y = 0; y < rows; ++y) {
+                uint8_t* row = base + static_cast<size_t>(y) * pitch;
+                uint32_t* mem = buf + static_cast<size_t>(y0 + y) * bufW + x0;
+                if (write) {
+                    memcpy(row, mem, static_cast<size_t>(cols) * 4);
+                } else if (bpp == 4) {
+                    memcpy(mem, row, static_cast<size_t>(cols) * 4);
                 } else {
                     const uint16_t* px = reinterpret_cast<const uint16_t*>(row);
-                    for (int x = 0; x < w; ++x) {
+                    for (int x = 0; x < cols; ++x) {
                         const uint16_t s = px[x];
-                        dstRow[x] = ((((s >> 12) & 0xFu) * 17u) << 24)
-                                  | ((((s >>  8) & 0xFu) * 17u) << 16)
-                                  | ((((s >>  4) & 0xFu) * 17u) <<  8)
-                                  |  (((s        & 0xFu) * 17u));
+                        mem[x] = ((((s >> 12) & 0xFu) * 17u) << 24)
+                               | ((((s >>  8) & 0xFu) * 17u) << 16)
+                               | ((((s >>  4) & 0xFu) * 17u) <<  8)
+                               |  (((s        & 0xFu) * 17u));
                     }
                 }
             }
@@ -457,6 +480,103 @@ bool ReadPixelsLocked(IWzCanvas* pCanvas, int w, int h, uint32_t* out) {
     }
     __try { raw->Release(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return ok;
+}
+
+// The canvas's own size and tile size. SEH leaf; zeros on any failure.
+void SehCanvasGeometry(IWzCanvas* pCanvas, unsigned int& cw, unsigned int& ch,
+                       unsigned int& tw, unsigned int& th) {
+    cw = ch = tw = th = 0;
+    __try {
+        if (FAILED(pCanvas->get_width(&cw)))      cw = 0;
+        if (FAILED(pCanvas->get_height(&ch)))     ch = 0;
+        if (FAILED(pCanvas->get_tileWidth(&tw)))  tw = 0;
+        if (FAILED(pCanvas->get_tileHeight(&th))) th = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        cw = ch = tw = th = 0;
+    }
+}
+
+// Bulk copy of a WHOLE canvas through the raw lock, TILE BY TILE.
+//
+// WHY PER TILE. A canvas larger than the device tile size (256 here) is stored as SEVERAL raw
+// canvases, and get_rawCanvas(0, 0) hands back only the FIRST ONE. Both bulk paths used to
+// refuse such a canvas outright and fall back to one COM call per pixel (get_pixel) or per run
+// (DrawRectangle) -- measured at ~350 ms for a single 278x96 Brandish frame and over a second
+// for its 352x348 ones, which stalled the Skills-tab preview on every frame and the first
+// in-game cast after a dye. Every skill effect frame past 256px is tiled; no equip sprite is.
+//
+// So each tile is fetched by its own index and locked on its own, the same walk
+// WeaponTint_ClearCanvas has been running on the window canvas: RawCanvasIndexIsTile settles
+// whether get_rawCanvas wants a TILE index or a PIXEL coordinate, and the last row/column of
+// tiles is clipped to what is really there. An untiled canvas is the one-tile case of the same
+// loop, so the old single-lock behaviour is unchanged for it.
+//
+// Every guard the two single-lock paths had is kept: the canvas must really be w x h (a Create
+// that came back smaller took h rows of memcpy off the end of its allocation once), each tile's
+// pitch must cover its columns, and every raw access is under SEH. Any failure returns false
+// and the caller falls back to the slow path, which rewrites every pixel anyway.
+bool TiledCopy(IWzCanvas* pCanvas, int w, int h, uint32_t* buf, int bpp, bool write) {
+    unsigned int cw = 0, ch = 0, tw = 0, th = 0;
+    SehCanvasGeometry(pCanvas, cw, ch, tw, th);
+    if (static_cast<int>(cw) != w || static_cast<int>(ch) != h) {
+        if (write) {
+            LOG_ONCE("weapontint: bulk write refused, canvas is %ux%u but %dx%d was expected",
+                     cw, ch, w, h);
+        } else {
+            LOG_ONCE("weapontint: locked read refused, canvas is %ux%u but %dx%d was expected",
+                     cw, ch, w, h);
+        }
+        return false;
+    }
+    if (!tw || static_cast<int>(tw) > w) tw = static_cast<unsigned int>(w);   // untiled
+    if (!th || static_cast<int>(th) > h) th = static_cast<unsigned int>(h);
+    const int tW = static_cast<int>(tw), tH = static_cast<int>(th);
+    const int tilesX = (w + tW - 1) / tW;
+    const int tilesY = (h + tH - 1) / tH;
+    const bool tiled = tilesX > 1 || tilesY > 1;
+    const bool byTile = RawCanvasIndexIsTile(pCanvas, tilesX, tilesY);
+
+    bool all = true;
+    for (int ty = 0; ty < tilesY && all; ++ty) {
+        for (int tx = 0; tx < tilesX && all; ++tx) {
+            const int x0 = tx * tW, y0 = ty * tH;
+            const int cols = (w - x0 < tW) ? (w - x0) : tW;
+            const int rows = (h - y0 < tH) ? (h - y0) : tH;
+            if (cols <= 0 || rows <= 0) continue;
+            const int ix = byTile ? tx : x0;
+            const int iy = byTile ? ty : y0;
+            if (!CopyTileLocked(pCanvas, ix, iy, x0, y0, cols, rows, buf, w, bpp, write)) {
+                all = false;
+            }
+        }
+    }
+    if (tiled) {
+        // Once per direction: which path the big frames actually take.
+        if (write) {
+            LOG_ONCE("weapontint: tiled bulk write %dx%d over %dx%d tiles of %dx%d, indexed "
+                     "by %s: %s", w, h, tilesX, tilesY, tW, tH, byTile ? "tile" : "pixel",
+                     all ? "ok" : "FAILED, per-run fallback");
+        } else {
+            LOG_ONCE("weapontint: tiled locked read %dx%d over %dx%d tiles of %dx%d, indexed "
+                     "by %s: %s", w, h, tilesX, tilesY, tW, tH, byTile ? "tile" : "pixel",
+                     all ? "ok" : "FAILED, get_pixel fallback");
+        }
+    }
+    return all;
+}
+
+// Read the whole canvas into `out` as ARGB8888. Returns false if the lock is
+// unusable, which sends the caller to the per-pixel reader.
+bool ReadPixelsLocked(IWzCanvas* pCanvas, int w, int h, uint32_t* out) {
+    CANVAS_PIXFORMAT fmt = CP_UNKNOWN;
+    __try {
+        if (FAILED(pCanvas->get_pixelFormat(&fmt))) fmt = CP_UNKNOWN;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        fmt = CP_UNKNOWN;
+    }
+    const int bpp = (fmt == CP_A8R8G8B8) ? 4 : ((fmt == CP_A4R4G4B4) ? 2 : 0);
+    if (bpp == 0) return false;
+    return TiledCopy(pCanvas, w, h, out, bpp, false);
 }
 
 // Per-pixel reader, for a build where the lock is unusable.
@@ -542,6 +662,20 @@ bool CopyCanvasProperty(IWzCanvasPtr src, IWzCanvasPtr dst) {
 //
 // Only 32-bit. Every canvas this writes to is one we Create()d as CP_A8R8G8B8, so there is
 // no packing case to get wrong.
+//
+// THE DESTINATION MUST REALLY BE w x h. Checking only `pitch >= w * 4` proves the rows are
+// wide enough and says NOTHING about how many rows exist, so a canvas that came back smaller
+// than asked for -- a Create that clamped, or a buffer not fully materialised because this
+// canvas has deliberately never been CopyEx-ed -- took h rows of memcpy off the end of its
+// allocation and corrupted the heap. The symptom was not a fault here: it was a crash later,
+// in whatever freed next (an access violation inside operator delete tidying the pixel vector).
+//
+// TILING IS THE OTHER ONE THAT MATTERED. get_rawCanvas(0, 0) hands back only the FIRST TILE of
+// a canvas past the device tile size, and writing w*h pixels into it linearly ran off the end
+// of that tile and through whatever the heap put next -- which is why this only ever hurt on
+// skill effect frames (median 16,560 pixels, up to 799,040) and never on equip sprites (median
+// 208, single tile). That used to be a refusal; TiledCopy now writes such a canvas one tile at
+// a time, each against its own pitch and clipped to its own size, and keeps both checks.
 bool WritePixelsLocked(IWzCanvas* pCanvas, int w, int h, const uint32_t* in) {
     CANVAS_PIXFORMAT fmt = CP_UNKNOWN;
     __try {
@@ -550,91 +684,8 @@ bool WritePixelsLocked(IWzCanvas* pCanvas, int w, int h, const uint32_t* in) {
         fmt = CP_UNKNOWN;
     }
     if (fmt != CP_A8R8G8B8) return false;
-
-    // THE DESTINATION MUST REALLY BE w x h. Checking only `pitch >= w * 4` proves the rows
-    // are wide enough and says NOTHING about how many rows exist, so a canvas that came back
-    // smaller than asked for -- a Create that clamped, or a buffer not fully materialised
-    // because this canvas has deliberately never been CopyEx-ed -- took h rows of memcpy off
-    // the end of its allocation and corrupted the heap. The symptom is not a fault here: it
-    // is a crash later, in whatever frees next, which is exactly how this presented (an
-    // access violation inside operator delete tidying the pixel vector).
-    //
-    // Returning false is safe: the caller falls back to the per-run path, which writes
-    // through the canvas API and is bounds-checked by it.
-    unsigned int cw = 0, ch = 0, tw = 0, th = 0;
-    __try {
-        if (FAILED(pCanvas->get_width(&cw)))  cw = 0;
-        if (FAILED(pCanvas->get_height(&ch))) ch = 0;
-        if (FAILED(pCanvas->get_tileWidth(&tw)))  tw = 0;
-        if (FAILED(pCanvas->get_tileHeight(&th))) th = 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        cw = ch = tw = th = 0;
-    }
-    if (static_cast<int>(cw) != w || static_cast<int>(ch) != h) {
-        LOG_ONCE("weapontint: bulk write refused, canvas is %ux%u but %dx%d was expected",
-                 cw, ch, w, h);
-        return false;
-    }
-    // TILING IS THE ONE THAT MATTERED. A canvas larger than the device tile size is stored as
-    // SEVERAL raw canvases, and get_rawCanvas(0, 0) hands back only the FIRST TILE. Writing
-    // w*h pixels into it linearly runs off the end of that tile and straight through whatever
-    // the heap put next -- which is why this only ever hurt on skill effect frames (median
-    // 16,560 pixels, up to 799,040) and never on equip sprites (median 208, single tile).
-    //
-    // The damage did not surface here either: it surfaced later, as a null dereference inside
-    // the CRT when some unrelated allocation tried to free a block whose header we had
-    // overwritten.
-    if (tw && th && (static_cast<int>(tw) < w || static_cast<int>(th) < h)) {
-        LOG_ONCE("weapontint: bulk write refused, %dx%d canvas is tiled at %ux%u; using the "
-                 "per-run path", w, h, tw, th);
-        return false;
-    }
-
-    IWzRawCanvas* raw = nullptr;
-    __try {
-        if (FAILED(pCanvas->get_rawCanvas(0, 0, &raw))) raw = nullptr;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        raw = nullptr;
-    }
-    if (!raw) return false;
-
-    int pitch = 0;
-    uint8_t* base = nullptr;
-    __try {
-        VARIANT vAddr;
-        VariantInit(&vAddr);
-        if (SUCCEEDED(raw->raw__LockAddress(&pitch, &vAddr))) {
-            const int base_vt = V_VT(&vAddr) & VT_TYPEMASK;
-            if (base_vt == VT_I4 || base_vt == VT_UI4
-                || base_vt == VT_INT || base_vt == VT_UINT) {
-                base = (V_VT(&vAddr) & VT_BYREF)
-                     ? reinterpret_cast<uint8_t*>(V_BYREF(&vAddr))
-                     : reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(V_I4(&vAddr)));
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        base = nullptr;
-    }
-
-    bool ok = false;
-    if (base && pitch >= w * 4) {
-        __try {
-            for (int y = 0; y < h; ++y) {
-                memcpy(base + static_cast<size_t>(y) * pitch,
-                       in + static_cast<size_t>(y) * w,
-                       static_cast<size_t>(w) * 4);
-            }
-            ok = true;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            ok = false;
-        }
-    }
-    if (base) {
-        __try { raw->raw__UnlockAddress(nullptr); }
-        __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
-    __try { raw->Release(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    return ok;
+    // The buffer is only READ on this direction; the cast is for the shared copier.
+    return TiledCopy(pCanvas, w, h, const_cast<uint32_t*>(in), 4, true);
 }
 
 // ONE BULK WRITE INSTEAD OF ONE COM CALL PER RUN.
@@ -756,8 +807,9 @@ IWzCanvasPtr CloneTinted(IWzCanvasPtr pSrc, const WeaponTint& t, bool mirror) {
             //   And a pre-copy is the sprite facing the other way when this clone is mirrored,
             //   which showed through as two copies of the effect back to back.
             //
-            // This path is taken for tiled canvases, which large skill effect frames are, so it
-            // is the common case for exactly the art where both of those were visible.
+            // This used to be the ONLY path for tiled canvases, which every large skill effect
+            // frame is; TiledCopy now writes those tile by tile, so this is the fallback for a
+            // lock that fails. Both properties above still matter when it runs.
             written = WriteRuns(dst, w, h, px, true);
         }
         ++g_cost.clones;
@@ -954,16 +1006,38 @@ bool IsBallPart(const wchar_t* name) {
     return name && _wcsicmp(name, L"ball") == 0;
 }
 
-bool IsMainEffectPart(const wchar_t* name) {
-    return name && _wcsicmp(name, L"effect") == 0;
-}
-
-bool IsExtraEffectPart(const wchar_t* name) {
-    return IsEffectPart(name) && !IsMainEffectPart(name);
-}
-
-bool IsSkillGlowPart(const wchar_t* name) {
-    return IsExtraEffectPart(name) || IsBallPart(name);
+// Which dyeable PART a direct child of Skill/<img>/skill/<id> is, per the table in
+// weapontint.h -- the same table the server validates actions 5/6 against, so it is matched
+// CASE-SENSITIVELY and exactly, never by a looser rule. Anything that is not listed (icon*,
+// level, req, action, info, common, summon, afterimage, weapon, masterLevel, ...) answers
+// kSkillPart_None and is never swapped.
+int SkillPartOf(const wchar_t* name) {
+    if (!name || !*name) return kSkillPart_None;
+    struct Named { const wchar_t* name; int part; };
+    static const Named kExact[] = {
+        { L"effect0", kSkillPart_Effect0 }, { L"effect1", kSkillPart_Effect1 },
+        { L"effect2", kSkillPart_Effect2 }, { L"effect3", kSkillPart_Effect3 },
+        { L"ball", kSkillPart_Ball }, { L"ball0", kSkillPart_Ball }, { L"ball1", kSkillPart_Ball },
+        { L"hit", kSkillPart_Hit }, { L"hit0", kSkillPart_Hit }, { L"hit1", kSkillPart_Hit },
+        { L"affected", kSkillPart_Affected }, { L"affected0", kSkillPart_Affected },
+        { L"specialAffected", kSkillPart_Affected },
+        { L"special", kSkillPart_Special },
+        { L"prepare", kSkillPart_Prepare },
+        { L"keydown", kSkillPart_Keydown }, { L"keydown0", kSkillPart_Keydown },
+        { L"keydownend", kSkillPart_KeydownEnd },
+        { L"repeat", kSkillPart_Repeat },
+        { L"finish", kSkillPart_Finish },
+        { L"screen", kSkillPart_Screen },
+        { L"tile", kSkillPart_Tile },
+        { L"mob", kSkillPart_Mob }, { L"mob0", kSkillPart_Mob },
+    };
+    for (const Named& n : kExact) {
+        if (wcscmp(name, n.name) == 0) return n.part;
+    }
+    // `effect` itself and every other effect* name the table does not claim (effect4,
+    // effect_ship, effectR, effecttemp) are the main effect.
+    if (wcsncmp(name, L"effect", 6) == 0) return kSkillPart_Effect;
+    return kSkillPart_None;
 }
 
 // What a child slot ACTUALLY holds, read before get_unknown resolves it away.
@@ -1100,34 +1174,48 @@ void SwapEffectSubtrees(IWzPropertyPtr pNode, const WeaponTint& t, int depth) {
     }
 }
 
-using PartMatch = bool (*)(const wchar_t*);
+// One dyeable part of a skill and the colour it takes for this cast.
+struct SkillPartTint {
+    int        part = kSkillPart_None;
+    WeaponTint tint;
+};
 
-// Same canvas-first walk as SwapEffectSubtrees, but the caller names which children
-// count. Skills use this to dye `effect` on its own, then `effect0` / `ball` on the
-// glow chip, without dragging item glow into the same rule.
-void SwapMatchingSubtrees(IWzPropertyPtr pNode, const WeaponTint& t, int depth, PartMatch match) {
-    if (!pNode || depth > 4 || !match) return;
-    for (const std::wstring& name : ChildNames(pNode)) {
-        Ztl_variant_t v = pNode->item[name.c_str()];
-        IUnknownPtr pRaw = RawChildObject(v);
+// Swap every DIRECT child of a skill node that is a dyeable part with a colour in `tints`,
+// each with its own colour. Children that are not parts are never looked at, which is the
+// whole reason the icon (and level / req / summon / afterimage) keep their pixels.
+//
+// Inside a part NOTHING is skipped: the part is effect art from its root down, so the walk
+// runs with Effects semantics and no name filter. A part that is itself a canvas (a one-frame
+// node) is swapped at its own slot.
+//
+// ALWAYS RETINT (see SwapCanvasSlot). Parts alias each other -- `ball/0` into `effect/0` is
+// common, and 1311002's whole `effect` / `hit` are UOLs into 1311001's -- so a slot can resolve
+// to a clone another part installed a moment earlier in this same pass. Retinting takes that
+// clone's ORIGINAL and dyes it this part's colour; the alias itself is what gets recorded and
+// put back, so the indirection survives, and a clone is never tinted a second time.
+void SwapSkillParts(IWzPropertyPtr pSkill, const std::vector<SkillPartTint>& tints) {
+    if (!pSkill || tints.empty()) return;
+    for (const std::wstring& name : ChildNames(pSkill)) {
+        const int part = SkillPartOf(name.c_str());
+        if (part == kSkillPart_None) continue;
+        const WeaponTint* t = nullptr;
+        for (const SkillPartTint& pt : tints) {
+            if (pt.part == part) { t = &pt.tint; break; }
+        }
+        if (!t) continue;
+        Ztl_variant_t v = pSkill->item[name.c_str()];
+        IUnknownPtr pRaw = RawChildObject(v);       // the alias itself, when it is one
         IUnknownPtr pUnk = get_unknown(v);
         if (!pUnk) continue;
-        const bool hit = match(name.c_str());
-        if (hit) {
-            IWzCanvasPtr pOrig;
-            if (SUCCEEDED(pUnk.QueryInterface(__uuidof(IWzCanvas), &pOrig)) && pOrig) {
-                // Always retint: `ball` commonly aliases `effect`, which the body pass
-                // already cloned. Skipping that clone left the projectile vanilla / in
-                // the main-effect colour after OK, while the preview (a fresh clone)
-                // looked correct.
-                SwapCanvasSlot(pNode, name, pRaw, pOrig, t, true);
-                continue;
-            }
+        IWzCanvasPtr pOrig;
+        if (SUCCEEDED(pUnk.QueryInterface(__uuidof(IWzCanvas), &pOrig)) && pOrig) {
+            SwapCanvasSlot(pSkill, name, pRaw, pOrig, *t, true);
+            continue;
         }
         IWzPropertyPtr pSub;
-        if (FAILED(pUnk.QueryInterface(__uuidof(IWzProperty), &pSub)) || !pSub) continue;
-        if (hit) SwapSubtree(pSub, t, depth + 1, Layer::Effects, false, true);
-        else     SwapMatchingSubtrees(pSub, t, depth + 1, match);
+        if (SUCCEEDED(pUnk.QueryInterface(__uuidof(IWzProperty), &pSub)) && pSub) {
+            SwapSubtree(pSub, *t, 1, Layer::Effects, false, true);
+        }
     }
 }
 
@@ -1802,50 +1890,99 @@ struct FaceIdGuard {
 // Tinting only the first one dyes the body and leaves the head its original colour, which
 // looks like the feature half working rather than like a missing img.
 //
-// The two are walked DIFFERENTLY because they are shaped differently. The body is ordinary
-// per-action art under <action>/<frame>, 258 canvases across 159 actions, so only the action
-// being built is walked. The head is shaped like hair instead: exactly TWO real canvases, at
-// `front/head` and `back/head`, with every action frame a UOL into them, so the whole img is
-// walked and no action name is needed.
+// BOTH ARE WALKED PER ACTION, FROM A CACHED PLAN. They used to be walked whole on every
+// build, on the belief that the body held 258 canvases. This Data tree's skin imgs are the
+// post-import ones: 00002000.img alone has 2774 canvases, 656 linked canvases and some
+// 15,000 sub-properties under ~400 actions. Walking that through COM on every
+// PrepareActionLayer froze the client for seconds -- on every slider step in the preview,
+// and then on every equip or action change for as long as a skin tint was applied.
+//
+// A build only ever reads the action being built, so that is all that is planned, plus
+// whatever that action REDIRECTS to. The body img is the client's action table, and a
+// redirecting frame holds no canvases, only `<action>/<frame>/action = "<other action>"`
+// (alert2 -> alert, savage -> stabO1, ...). Those are followed by name, transitively,
+// because the body drew vanilla through every one of them when they were not. UOL aliases
+// into other actions (prone/0/body -> proneStab/0/body) need nothing extra: the plan
+// records the alias slot itself and restores the alias, not the canvas behind it.
 //
 // Dyeing the canvases is deliberate rather than swapping nSkin to another skin id: the client
 // ships a fixed set of skins, and the point of the tab is a free colour.
+void CollectActionPlan(IWzPropertyPtr pImg, const std::wstring& action, SwapPlan& plan,
+                       std::vector<std::wstring>& seen) {
+    if (!pImg || action.empty() || seen.size() >= 16) return;
+    if (std::find(seen.begin(), seen.end(), action) != seen.end()) return;
+    seen.push_back(action);
+    try {
+        Ztl_variant_t v = pImg->item[action.c_str()];
+        IUnknownPtr pUnk = get_unknown(v);
+        IWzPropertyPtr pAct;
+        if (!pUnk || FAILED(pUnk.QueryInterface(__uuidof(IWzProperty), &pAct)) || !pAct) return;
+        BuildPlanFrom(pAct, plan, 1, false);
+        for (const std::wstring& f : ChildNames(pAct)) {
+            Ztl_variant_t vf = pAct->item[f.c_str()];
+            IUnknownPtr pf = get_unknown(vf);
+            IWzPropertyPtr pFrame;
+            if (!pf || FAILED(pf.QueryInterface(__uuidof(IWzProperty), &pFrame)) || !pFrame) continue;
+            std::wstring target;
+            try {
+                Ztl_variant_t va = pFrame->item[L"action"];
+                if (V_VT(&va) == VT_BSTR && V_BSTR(&va)) target = V_BSTR(&va);
+            } catch (...) {
+            }
+            if (!target.empty()) CollectActionPlan(pImg, target, plan, seen);
+        }
+    } catch (...) {
+    }
+}
+
+// Keyed on the LIVE img pointer (same invalidation rule as PlanFor) plus the action name.
+std::map<std::pair<IWzProperty*, std::wstring>, std::shared_ptr<SwapPlan>> g_actionPlans;
+
+std::shared_ptr<SwapPlan> ActionPlanFor(IWzPropertyPtr pImg, const wchar_t* action) {
+    if (!pImg || !action || !*action) return nullptr;
+    auto key = std::make_pair(pImg.GetInterfacePtr(), std::wstring(action));
+    auto it = g_actionPlans.find(key);
+    if (it != g_actionPlans.end()) return it->second;
+    auto plan = std::make_shared<SwapPlan>();
+    std::vector<std::wstring> seen;
+    CollectActionPlan(pImg, key.second, *plan, seen);
+    g_actionPlans.emplace(key, plan);
+    LOG_ONCE_PER_ID(static_cast<int>(plan->entries.size()) * 1000 + static_cast<int>(seen.size()),
+                    "weapontint: action plan %ls: %d slots over %d action(s)", action,
+                    static_cast<int>(plan->entries.size()), static_cast<int>(seen.size()));
+    return plan;
+}
+
 void SwapInSkinTint(int skinId, const wchar_t* actionName, const WeaponTint& t) {
     if (skinId < 0) return;
     try {
         wchar_t path[80];
+        // Body: body, arm, hand, lHand, rHand, armOverHair of the action being built.
         if (actionName) {
             _snwprintf_s(path, _countof(path), _TRUNCATE, L"Character/%08d.img", 2000 + skinId);
             IWzPropertyPtr pBody = get_rm()->GetObjectA(path).GetUnknown();
-            if (pBody) {
-                // Whole img. This one IS the client's action table, so 114 of its own nodes
-                // are redirects holding no canvases, and the body drew vanilla through every
-                // one of them.
-                for (const std::wstring& n : ChildNames(pBody)) {
-                    if (n == L"info") continue;
-                    IWzPropertyPtr p = pBody->item[n.c_str()].GetUnknown();
-                    if (p) SwapSubtree(p, t, 0, Layer::Body);
-                }
-            }
+            if (pBody) ApplyPlan(ActionPlanFor(pBody, actionName), t, Layer::Body);
         }
+        // Head. Shaped like hair: the stock actions' frames are all UOLs into the two real
+        // canvases at front/head and back/head, so those two are always planned; the action
+        // plan then adds the few actions that carry real canvases of their own (the PB*
+        // set). EVERY plan is built before ANY is applied: a plan must be recorded from the
+        // tree at rest, and once front/head holds a clone an alias read through it would
+        // record the clone as the "original".
         _snwprintf_s(path, _countof(path), _TRUNCATE, L"Character/%08d.img", 12000 + skinId);
         IWzPropertyPtr pHead = get_rm()->GetObjectA(path).GetUnknown();
         if (pHead) {
-            // The two REAL canvases. Every action frame in this img is a UOL into one of
-            // them, so if the client resolves those UOLs live this is the whole job.
-            for (const wchar_t* n : { L"front", L"back" }) {
-                IWzPropertyPtr p = pHead->item[n].GetUnknown();
-                if (p) SwapSubtree(p, t, 0, Layer::Body);
+            std::shared_ptr<SwapPlan> plans[3];
+            int n = 0;
+            for (const wchar_t* side : { L"front", L"back" }) {
+                Ztl_variant_t v = pHead->item[side];
+                IUnknownPtr pUnk = get_unknown(v);
+                IWzPropertyPtr pSide;
+                if (pUnk && SUCCEEDED(pUnk.QueryInterface(__uuidof(IWzProperty), &pSide)) && pSide)
+                    plans[n++] = PlanFor(pSide);
             }
-            // DO NOT ALSO SWAP THE ACTION FRAMES. Every `<action>/<frame>/head` in this
-            // img is a UOL into front/head, and the swap resolves a UOL transparently:
-            // it would read the frame, get the canvas the UOL points at, and write a
-            // tinted clone into the frame slot. SwapOut then restores that slot to the
-            // RESOLVED CANVAS rather than to the UOL, which permanently replaces the
-            // indirection with a direct reference to the untinted original. The frame
-            // stops following front/head from then on, so the body keeps recolouring and
-            // the head does not: two different colours on one character, surviving until
-            // the client is restarted and reloads the img.
+            if (actionName) plans[n++] = ActionPlanFor(pHead, actionName);
+            for (int i = 0; i < n; ++i) ApplyPlan(plans[i], t, Layer::Body);
         }
     } catch (...) {
     }
@@ -2347,7 +2484,10 @@ void __fastcall PrepareActionLayer_Hook(void* pThis, void* /*edx*/,
             SwapInFaceTint(faceId, tLook);
         // Skin last: its canvases are the body the others sit on top of, and the swap
         // list is restored in reverse, so this keeps the unwind order the mirror of the
-        // build order.
+        // build order. It is inside the timed region: it was the one pass the log never
+        // measured, and it was the one that cost seconds.
+        if (skinId >= 0 && scope.Lookup(kTintKey_Skin, tLook) && !tLook.IsIdentity())
+            SwapInSkinTint(skinId, sAction.GetBSTR(), tLook);
         QueryPerformanceCounter(&tSwap1);
         // Builds that cloned nothing are logged too, rate limited: those are the PURE WALK
         // and are the most informative line here. If a build that clones nothing still costs
@@ -2363,8 +2503,6 @@ void __fastcall PrepareActionLayer_Hook(void* pThis, void* /*edx*/,
                        g_cost.swaps, g_cost.clones, g_cost.bulk, g_cost.perRun, g_cost.pixels,
                        total, total - clone, clone);
         }
-        if (skinId >= 0 && scope.Lookup(kTintKey_Skin, tLook) && !tLook.IsIdentity())
-            SwapInSkinTint(skinId, sAction.GetBSTR(), tLook);
         PrepareActionLayer_Orig(pThis, nActionSpeed, nWalkSpeed, bKeyDown);
     }
 }
@@ -2603,42 +2741,6 @@ bool ClearTileLocked(IWzCanvas* pCanvas, int tx, int ty, int cols, int rows) {
     return ok;
 }
 
-// Is rawCanvas[][] indexed by TILE or by PIXEL?
-//
-// It matters and it cannot be assumed: under pixel indexing every (tx, ty) in a tile loop lands
-// back in the FIRST tile, so a clear reports success on every tile while only ever erasing the
-// top-left one. That is precisely how this presented -- six tiles reported ok and the pixels
-// past x = 256 survived.
-//
-// Answered by comparing the objects handed back for two indices, because that is READ ONLY.
-// The tempting probe -- ask for an out-of-range index and see if it fails -- risks being handed
-// a surface that is not there, and writing into one of those is how this area corrupted the
-// heap before. The probe index is valid under both conventions by construction.
-bool RawCanvasIndexIsTile(IWzCanvas* pCanvas, int tilesX, int tilesY) {
-    int px = 0, py = 0;
-    if (tilesX > 1)      px = 1;
-    else if (tilesY > 1) py = 1;
-    else return true;                          // one tile: the conventions agree
-
-    IWzRawCanvas* a = nullptr;
-    IWzRawCanvas* b = nullptr;
-    __try {
-        if (FAILED(pCanvas->get_rawCanvas(0, 0, &a))) a = nullptr;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        a = nullptr;
-    }
-    __try {
-        if (FAILED(pCanvas->get_rawCanvas(px, py, &b))) b = nullptr;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        b = nullptr;
-    }
-    // Different objects means the index picked a different tile, so it is a tile index.
-    const bool distinct = (a && b && a != b);
-    if (a) { __try { a->Release(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    if (b) { __try { b->Release(); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
-    return distinct;
-}
-
 bool WeaponTint_ClearCanvas(void* pCanvasV, int w, int h) {
     IWzCanvas* pCanvas = reinterpret_cast<IWzCanvas*>(pCanvasV);
     if (!pCanvas || w <= 0 || h <= 0) return false;
@@ -2735,6 +2837,8 @@ bool WeaponTint_ItemHasEffectArt(int itemId) {
 
 namespace {
 
+// Skill/<img>/skill/<id>. `%07d` is a minimum width, so the eight-digit Cygnus and Aran ids
+// (Skill/1100.img/skill/11001004) come out whole.
 IWzPropertyPtr SkillImgNode(int skillId) {
     if (skillId <= 0) return nullptr;
     wchar_t path[96];
@@ -2747,92 +2851,103 @@ IWzPropertyPtr SkillImgNode(int skillId) {
     }
 }
 
-} // namespace
+// Is there a canvas anywhere under this node (or is it one)? Canvas FIRST, for the reason the
+// swap walks give: descending on the property interface first would walk into a canvas's own
+// origin / delay children and find nothing. Depth-bounded like the walks: a part is at most
+// <layer>/<frame> deep.
+bool HasCanvasUnder(IUnknownPtr pUnk, int depth) {
+    if (!pUnk || depth > 4) return false;
+    IWzCanvasPtr pCanvas;
+    if (SUCCEEDED(pUnk.QueryInterface(__uuidof(IWzCanvas), &pCanvas)) && pCanvas) return true;
+    IWzPropertyPtr pNode;
+    if (FAILED(pUnk.QueryInterface(__uuidof(IWzProperty), &pNode)) || !pNode) return false;
+    for (const std::wstring& name : ChildNames(pNode)) {
+        Ztl_variant_t v = pNode->item[name.c_str()];
+        IUnknownPtr pSub = get_unknown(v);
+        if (pSub && HasCanvasUnder(pSub, depth + 1)) return true;
+    }
+    return false;
+}
 
-bool WeaponTint_SkillHasEffectArt(int skillId) {
-    if (skillId <= 0) return false;
-    static std::map<int, bool> s_cache;
+// What a skill offers the Skills tab, worked out once per skill. A part is listed only when a
+// node of it holds real art: a `hit` with nothing but an `onlyOnce` flag under it is no more
+// dyeable than `level`, and offering it would take a prism for a colour nothing draws.
+struct SkillPartInfo {
+    std::vector<WeaponTintSkillChild> children;     // node order
+    int  parts[kSkillPartCount] = {};                // ascending
+    int  nParts = 0;
+    bool has[kSkillPartCount + 1] = {};
+};
+
+const SkillPartInfo& SkillPartsOf(int skillId) {
+    static std::map<int, SkillPartInfo> s_cache;
     auto it = s_cache.find(skillId);
     if (it != s_cache.end()) return it->second;
-
-    bool has = false;
+    SkillPartInfo info;
     try {
         IWzPropertyPtr pNode = SkillImgNode(skillId);
         if (pNode) {
             for (const std::wstring& name : ChildNames(pNode)) {
-                if (IsEffectPart(name.c_str())) { has = true; break; }
+                const int part = SkillPartOf(name.c_str());
+                if (part == kSkillPart_None) continue;
+                if (name.size() >= sizeof(WeaponTintSkillChild::name) / sizeof(wchar_t)) continue;
+                Ztl_variant_t v = pNode->item[name.c_str()];
+                if (!HasCanvasUnder(get_unknown(v), 0)) continue;
+                WeaponTintSkillChild c;
+                c.part = part;
+                wcsncpy_s(c.name, _countof(c.name), name.c_str(), _TRUNCATE);
+                info.children.push_back(c);
+                info.has[part] = true;
             }
         }
     } catch (...) {
     }
-    s_cache.emplace(skillId, has);
-    return has;
-}
-
-namespace {
-
-struct SkillSplit {
-    bool extraFx = false;
-    bool ball = false;
-    bool any() const { return extraFx || ball; }
-};
-
-SkillSplit SplitOfSkill(int skillId) {
-    SkillSplit s;
-    if (skillId <= 0) return s;
-    try {
-        IWzPropertyPtr pNode = SkillImgNode(skillId);
-        if (!pNode) return s;
-        int effectCount = 0;
-        for (const std::wstring& name : ChildNames(pNode)) {
-            if (IsEffectPart(name.c_str())) ++effectCount;
-            if (IsBallPart(name.c_str())) s.ball = true;
-        }
-        s.extraFx = effectCount > 1;
-    } catch (...) {
+    for (int p = kSkillPartMin; p <= kSkillPartMax; ++p) {
+        if (info.has[p]) info.parts[info.nParts++] = p;
     }
-    return s;
+    LOG_ONCE_PER_ID(skillId, "weapontint: skill %d has %d dyeable part(s) over %d node(s)",
+                    skillId, info.nParts, static_cast<int>(info.children.size()));
+    return s_cache.emplace(skillId, std::move(info)).first->second;
 }
 
 } // namespace
 
-bool WeaponTint_SkillHasSplitLayers(int skillId) {
-    if (skillId <= 0) return false;
-    static std::map<int, bool> s_cache;
-    auto it = s_cache.find(skillId);
-    if (it != s_cache.end()) return it->second;
-    const bool has = SplitOfSkill(skillId).any();
-    s_cache.emplace(skillId, has);
-    return has;
+int WeaponTint_SkillPartOfChild(const wchar_t* name) {
+    return SkillPartOf(name);
 }
 
-bool WeaponTint_SkillHasExtraEffect(int skillId) {
-    return SplitOfSkill(skillId).extraFx;
-}
-
-bool WeaponTint_SkillHasBall(int skillId) {
-    return SplitOfSkill(skillId).ball;
-}
-
-bool WeaponTint_SkillPartIsGlow(const wchar_t* name) {
-    return IsSkillGlowPart(name);
-}
-
-int WeaponTint_ListSkillEffectParts(int skillId, wchar_t names[][16], int maxNames) {
-    if (skillId <= 0 || !names || maxNames <= 0) return 0;
+int WeaponTint_ListSkillParts(int skillId, int partsOut[], int cap) {
+    if (skillId <= 0 || !partsOut || cap <= 0) return 0;
+    const SkillPartInfo& info = SkillPartsOf(skillId);
     int n = 0;
-    try {
-        IWzPropertyPtr pNode = SkillImgNode(skillId);
-        if (!pNode) return 0;
-        for (const std::wstring& name : ChildNames(pNode)) {
-            if (!IsEffectPart(name.c_str()) && !IsBallPart(name.c_str())) continue;
-            if (n >= maxNames) break;
-            wcsncpy_s(names[n], 16, name.c_str(), _TRUNCATE);
-            ++n;
-        }
-    } catch (...) {
+    for (int i = 0; i < info.nParts && n < cap; ++i) partsOut[n++] = info.parts[i];
+    return n;
+}
+
+bool WeaponTint_SkillHasPart(int skillId, int part) {
+    if (skillId <= 0 || !IsSkillPartValid(part)) return false;
+    return SkillPartsOf(skillId).has[part];
+}
+
+int WeaponTint_ListSkillPartChildren(int skillId, WeaponTintSkillChild out[], int cap) {
+    if (skillId <= 0 || !out || cap <= 0) return 0;
+    const SkillPartInfo& info = SkillPartsOf(skillId);
+    int n = 0;
+    for (const WeaponTintSkillChild& c : info.children) {
+        if (n >= cap) break;
+        out[n++] = c;
     }
     return n;
+}
+
+const wchar_t* WeaponTint_SkillPartLabel(int part) {
+    static const wchar_t* const kLabels[kSkillPartCount + 1] = {
+        L"",
+        L"Effect", L"Effect 0", L"Effect 1", L"Effect 2", L"Effect 3",
+        L"Ball", L"Hit", L"Affected", L"Special", L"Prepare",
+        L"Keydown", L"Keydown End", L"Repeat", L"Finish", L"Screen", L"Tile", L"Mob",
+    };
+    return IsSkillPartValid(part) ? kLabels[part] : L"";
 }
 
 int WeaponTint_BaseWeaponIdOf(void* pAvatar) {
@@ -2899,17 +3014,17 @@ void WeaponTint_AdoptOptimistic(int itemId, const WeaponTint& t) {
         std::lock_guard<std::mutex> lock(g_mtx);
         if (t.IsIdentity()) g_saved.erase(itemId);
         else                g_saved[itemId] = t;
-        // A skill has two keys. Confirming glow must not let the next snapshot drop
-        // the body colour, and confirming body must not drop glow. Restore of THIS
-        // key has already erased it, so it is not re-protected.
-        int skillId = 0;
-        if (IsSkillFxTintKey(itemId)) skillId = SkillOfFxTintKey(itemId);
-        else if (IsSkillTintKey(itemId)) skillId = SkillOfTintKey(itemId);
-        if (skillId > 0) {
-            const int bodyKey = SkillTintKeyFor(skillId);
-            const int fxKey = SkillFxTintKeyFor(skillId);
-            if (g_saved.find(bodyKey) != g_saved.end()) g_protectKeys.insert(bodyKey);
-            if (g_saved.find(fxKey) != g_saved.end()) g_protectKeys.insert(fxKey);
+        // A skill has one key PER PART. Confirming Ball must not let the next snapshot drop
+        // the Effect colour the player confirmed a moment earlier (a cap, an older server,
+        // the apply of the other part still in flight), so every saved part key of this
+        // skill is protected until that snapshot lands. Restore of THIS key has already
+        // erased it, so it is not re-protected.
+        if (IsSkillPartKey(itemId)) {
+            const int skillId = SkillOfPartKey(itemId);
+            for (const auto& kv : g_saved) {
+                if (IsSkillPartKey(kv.first) && SkillOfPartKey(kv.first) == skillId)
+                    g_protectKeys.insert(kv.first);
+            }
         }
     }
     // Confirm is the moment the world character is supposed to change, and now the only
@@ -3035,9 +3150,13 @@ void WeaponTint_SendRestore(const WeaponTintTarget& target, int prismPos, int la
     Send(o);
 }
 
-// No target: the server reads the character's OWN hair/face, so there is nothing here
-// for it to re-verify against and nothing the client could lie about.
-void WeaponTint_SendApplySkill(int skillId, const WeaponTint& t, int prismPos, int layer) {
+// Actions 5 / 6: skillId(4) hue(2) chroma(1) bright(1) prismPos(2) part(1), and
+// skillId(4) prismPos(2) part(1). The PART byte is required and is a kSkillPart_* id; the
+// server stores the colour under SkillPartKeyFor(skillId, part), which is the key its
+// snapshot sends back and the key BeginSkillSwap looks up. A part id outside 1..17 is a
+// window bug, so it is refused here rather than sent for the server to refuse.
+void WeaponTint_SendApplySkill(int skillId, const WeaponTint& t, int prismPos, int part) {
+    if (skillId <= 0 || !IsSkillPartValid(part)) return;
     COutPacket o(kWeaponTintActionOpcode);
     o.Encode1(kAction_ApplySkill);
     o.Encode4(static_cast<unsigned int>(skillId));
@@ -3045,17 +3164,20 @@ void WeaponTint_SendApplySkill(int skillId, const WeaponTint& t, int prismPos, i
     o.Encode1(static_cast<unsigned char>(t.chroma));
     o.Encode1(static_cast<unsigned char>(t.bright));
     o.Encode2(static_cast<unsigned short>(static_cast<short>(prismPos)));
-    o.Encode1(static_cast<unsigned char>(layer));
+    o.Encode1(static_cast<unsigned char>(part));
     Send(o);
 }
-void WeaponTint_SendRestoreSkill(int skillId, int prismPos, int layer) {
+void WeaponTint_SendRestoreSkill(int skillId, int prismPos, int part) {
+    if (skillId <= 0 || !IsSkillPartValid(part)) return;
     COutPacket o(kWeaponTintActionOpcode);
     o.Encode1(kAction_RestoreSkill);
     o.Encode4(static_cast<unsigned int>(skillId));
     o.Encode2(static_cast<unsigned short>(static_cast<short>(prismPos)));
-    o.Encode1(static_cast<unsigned char>(layer));
+    o.Encode1(static_cast<unsigned char>(part));
     Send(o);
 }
+// No target: the server reads the character's OWN hair/face, so there is nothing here
+// for it to re-verify against and nothing the client could lie about.
 void WeaponTint_SendApplyLook(int kind, const WeaponTint& t, int prismPos) {
     COutPacket o(kWeaponTintActionOpcode);
     o.Encode1(kAction_ApplyLook);
@@ -3252,8 +3374,9 @@ void WeaponTint_Tick() {
 //
 // The art is reachable because the startup load stores UOL STRINGS on the SKILLENTRY rather
 // than resolved canvases, and the layer factory re-resolves them through GetObjectA on every
-// call. Swapping the skill's whole subtree covers effect, screen, hit, ball, mob and the
-// rest in one pass, and the plan cache makes walking it once per skill essentially free.
+// call. Each dyeable PART of the skill (effect, effect0..3, ball, hit, affected, special,
+// prepare, keydown, keydownend, repeat, finish, screen, tile, mob -- see weapontint.h) is
+// swapped in its own colour in one pass; nothing else under the node is touched.
 //
 // FIVE STACK ARGUMENTS, not four. The function ends `ret 0x14` at 0x009362EC, so it pops 20
 // bytes; a four-argument declaration pops 16 and leaves the stack four bytes out on every
@@ -3272,8 +3395,10 @@ auto ShowSkillEffect_Orig =
 // was already there, and everything still waiting to resolve fell back to the original art.
 struct HeldSkillSwap {
     int               skillId = 0;
-    WeaponTint        tintBody;
-    WeaponTint        tintFx;
+    // Every (part, colour) this swap installed, ascending by part. Compared as a whole: the
+    // same skill at the same colours reuses the held swap; any part changing colour, or
+    // gaining or losing one, rebuilds it.
+    std::vector<SkillPartTint> tints;
     std::vector<Swap> swaps;
     DWORD             expiry = 0;      // GetTickCount deadline; 0 means "not held"
 };
@@ -3295,7 +3420,7 @@ int SehSkillIdOf(void* pSkillEntry) {
     return id;
 }
 
-// Swap the whole `Skill/<job>.img/skill/<id>` subtree for one build.
+// Swap the dyeable parts of `Skill/<job>.img/skill/<id>` for one build.
 // The skill whose cast is currently in flight, so a bullet queued during it can name the swap
 // it belongs to. The bullet call carries no skill id of its own.
 int g_lastSkillSwapId = 0;
@@ -3303,25 +3428,53 @@ int g_lastSkillSwapId = 0;
 void HoldSkillSwap(int skillId, DWORD ms);
 bool IsSkillSwapHeld(int skillId);
 
+bool SameSkillTints(const std::vector<SkillPartTint>& a, const std::vector<SkillPartTint>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].part != b[i].part || a[i].tint != b[i].tint) return false;
+    }
+    return true;
+}
+
+// The non-identity colour of every part this skill actually has, for this avatar. Only the
+// skill's own parts are looked up (at most seventeen lookups, usually two or three), so a cast
+// of an undyed skill costs one cached list and nothing else.
+std::vector<SkillPartTint> SkillTintsFor(const TintScope& scope, int skillId) {
+    std::vector<SkillPartTint> out;
+    if (!scope.any || skillId <= 0) return out;
+    int parts[kSkillPartCount];
+    const int n = WeaponTint_ListSkillParts(skillId, parts, kSkillPartCount);
+    for (int i = 0; i < n; ++i) {
+        WeaponTint t;
+        if (scope.Lookup(SkillPartKeyFor(skillId, parts[i]), t) && !t.IsIdentity())
+            out.push_back(SkillPartTint{ parts[i], t });
+    }
+    return out;
+}
+
+// Does this cast need the LONG hold? Projectiles resolve their `ball` sprite on a later tick,
+// and `hit` / `mob` art is built when the damage comes back -- both well after the 400 ms
+// that covers a caster-side effect. Set by BeginSkillSwap for the hook that holds it.
+bool g_skillSwapWantsLongHold = false;
+
 bool BeginSkillSwap(CAvatar* pAvatar, int skillId) {
+    g_skillSwapWantsLongHold = false;
     if (skillId <= 0 || !pAvatar) return false;
     const TintScope scope = ScopeForAvatar(pAvatar);
-    WeaponTint tBody, tFx;
-    const bool haveBody = scope.any && scope.Lookup(SkillTintKeyFor(skillId), tBody)
-                          && !tBody.IsIdentity();
-    const bool haveFx = scope.any && scope.Lookup(SkillFxTintKeyFor(skillId), tFx)
-                        && !tFx.IsIdentity();
-    if (!haveBody && !haveFx) return false;
-    if (!haveBody) tBody = WeaponTint{};
-    if (!haveFx) tFx = WeaponTint{};
+    std::vector<SkillPartTint> tints = SkillTintsFor(scope, skillId);
+    if (tints.empty()) return false;
+    for (const SkillPartTint& pt : tints) {
+        if (pt.part == kSkillPart_Hit || pt.part == kSkillPart_Mob) g_skillSwapWantsLongHold = true;
+    }
+    if (WeaponTint_SkillHasPart(skillId, kSkillPart_Ball)) g_skillSwapWantsLongHold = true;
 
-    // ALREADY HELD for this skill at this colour: reuse it. Rebuilding would mean
+    // ALREADY HELD for this skill at these colours: reuse it. Rebuilding would mean
     // restore-then-reinstall, and every one of those is an instant where the tree holds the
     // ORIGINAL art -- a projectile resolving across it takes the original for good.
     for (HeldSkillSwap& h : g_heldSkillSwaps) {
         if (h.skillId == skillId && !h.swaps.empty()) {
-            if (h.tintBody == tBody && h.tintFx == tFx) return true;
-            SwapOutList(h.swaps);            // same skill, new colour: this one has to go
+            if (SameSkillTints(h.tints, tints)) return true;
+            SwapOutList(h.swaps);            // same skill, new colours: this one has to go
             break;
         }
     }
@@ -3332,53 +3485,41 @@ bool BeginSkillSwap(CAvatar* pAvatar, int skillId) {
 
     g_heldSkillSwaps.emplace_back();
     HeldSkillSwap& held = g_heldSkillSwaps.back();
-    held.skillId  = skillId;
-    held.tintBody = tBody;
-    held.tintFx   = tFx;
+    held.skillId = skillId;
+    held.tints   = tints;
     try {
-        wchar_t path[96];
-        _snwprintf_s(path, _countof(path), _TRUNCATE,
-                     L"Skill/%03d.img/skill/%07d", skillId / 10000, skillId);
-        IWzPropertyPtr pNode = get_rm()->GetObjectA(path).GetUnknown();
-        if (!pNode) return false;
-        SwapSinkTo sink(held.swaps);
-        // A skill with only `effect` (no `effect0`, no `ball`) has one colour: the body
-        // key tints the whole img except the skill-window icon. Extra effect nodes and
-        // `ball` are a second colour, the same split the window's glow chip writes.
-        if (!WeaponTint_SkillHasSplitLayers(skillId)) {
-            if (haveBody) SwapSubtree(pNode, tBody, 0, Layer::Effects, true);
-        } else {
-            if (haveBody) {
-                SwapSubtree(pNode, tBody, 0, Layer::Body, true);
-                SwapMatchingSubtrees(pNode, tBody, 0, IsMainEffectPart);
-            }
-            if (haveFx) SwapMatchingSubtrees(pNode, tFx, 0, IsSkillGlowPart);
+        IWzPropertyPtr pNode = SkillImgNode(skillId);
+        if (!pNode) {
+            g_heldSkillSwaps.pop_back();
+            return false;
         }
+        SwapSinkTo sink(held.swaps);
+        // PER PART, each in its own colour. Only the direct children that are dyeable parts
+        // are touched, so the icon and everything else in the node keep their pixels.
+        SwapSkillParts(pNode, tints);
 
         // WHAT DID WE ACTUALLY TINT? Bounded to the first few casts. Count this cast's
         // held list, not the preview's g_skillSwaps (that one is empty on a world cast).
         static int s_left = 3;
         if (s_left > 0) {
             --s_left;
-            LogMessage("weapontint: skill %d body=%d fx=%d swapped %u canvases", skillId,
-                       haveBody ? 1 : 0, haveFx ? 1 : 0,
+            LogMessage("weapontint: skill %d, %u tinted part(s), swapped %u canvases", skillId,
+                       static_cast<unsigned>(tints.size()),
                        static_cast<unsigned>(held.swaps.size()));
             for (const std::wstring& child : ChildNames(pNode)) {
+                const int part = SkillPartOf(child.c_str());
+                if (part == kSkillPart_None) continue;
                 Ztl_variant_t cv = pNode->item[child.c_str()];
                 IUnknownPtr cu = get_unknown(cv);
                 if (!cu) continue;
                 IWzPropertyPtr cp;
                 if (FAILED(cu.QueryInterface(__uuidof(IWzProperty), &cp)) || !cp) continue;
-                int kids = 0, mine = 0;
-                for (const std::wstring& k : ChildNames(cp)) {
-                    ++kids;
-                    (void)k;
-                }
+                int mine = 0;
                 for (const Swap& s : held.swaps) {
                     if (s.parent.GetInterfacePtr() == cp.GetInterfacePtr()) ++mine;
                 }
-                LogMessage("weapontint:   %-10S children=%-3d swapped=%d",
-                           child.c_str(), kids, mine);
+                LogMessage("weapontint:   %-16S part=%-2d swapped=%d (direct children)",
+                           child.c_str(), part, mine);
             }
         }
     } catch (...) {
@@ -3417,7 +3558,9 @@ bool IsSkillSwapHeld(int skillId) {
 // that is the cost of not having a hook at the hit builder, and it is cosmetic and transient.
 constexpr DWORD kSkillSwapHoldMs = 400;
 // Projectiles are only QUEUED in ShowSkillEffect. CreateBullet resolves the ball
-// sprite on a later ~30ms tick, often after 400ms has already restored the tree.
+// sprite on a later ~30ms tick, often after 400ms has already restored the tree. A tinted
+// `hit` or `mob` part takes the same hold: that art is built when the damage packet comes
+// back, which routinely lands after 400ms too.
 constexpr DWORD kSkillBallHoldMs = 3500;
 
 // Restore held swaps whose window is up, each on its own deadline. Called from the per-frame
@@ -3448,8 +3591,8 @@ void __fastcall ShowSkillEffect_Hook(void* pThis, void* /*edx*/, void* pSkillEnt
     if (BeginSkillSwap(pAvatar, skillId)) {
         // Held against THIS skill. Nothing here touches any other skill's swap, which is the
         // whole point: Final Attack firing half a second into a volley used to evict it.
-        const DWORD hold = WeaponTint_SkillHasBall(skillId) ? kSkillBallHoldMs
-                                                           : kSkillSwapHoldMs;
+        // The long hold when a projectile or a tinted hit / mob part still has to resolve.
+        const DWORD hold = g_skillSwapWantsLongHold ? kSkillBallHoldMs : kSkillSwapHoldMs;
         HoldSkillSwap(skillId, hold);
         g_lastSkillSwapId = skillId;
     }
@@ -3458,8 +3601,14 @@ void __fastcall ShowSkillEffect_Hook(void* pThis, void* /*edx*/, void* pSkillEnt
 
 // The window's preview needs the same swap the world build gets, so the pane shows the tint
 // being dragged rather than the saved one. Mirrors WeaponTint_Begin/EndCashEffectSwap.
+//
+// The swap lands in the skill's HELD list like a world cast's, so it is given the short hold
+// here: a held swap with no deadline is never put back by ExpireSkillSwap, and a caller that
+// forgot to end it would leave the skill tinted for everyone for the rest of the session.
 bool WeaponTint_BeginSkillSwap(void* pAvatar, int skillId) {
-    return BeginSkillSwap(reinterpret_cast<CAvatar*>(pAvatar), skillId);
+    if (!BeginSkillSwap(reinterpret_cast<CAvatar*>(pAvatar), skillId)) return false;
+    HoldSkillSwap(skillId, kSkillSwapHoldMs);
+    return true;
 }
 // The client frame clock CreateBullet's launch/arrive pair is expressed on. NOT GetTickCount:
 // `mov eax,[0xBE7B38]; mov eax,[eax+0x18]; ret`, and it reads milliseconds (the stock shooting

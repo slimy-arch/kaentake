@@ -112,29 +112,63 @@ inline bool IsEffectTintKey(int key) {
 inline int  EffectTintKeyFor(int itemId) { return itemId + kTintKey_EffectBias; }
 inline int  ItemOfEffectTintKey(int key) { return key - kTintKey_EffectBias; }
 
+// ============================================================
+// SKILL PART TINTS -- the window's Skills tab.
+//
+// A skill is not one sprite. Its node, Skill/<img>/skill/<id>, carries up to seventeen kinds
+// of art (the caster's effect, a projectile, what the mob wears when hit, a full-screen
+// overlay, ...) and each is dyed on its own. The PART is the direct child NAME, matched
+// case-sensitively; several names can share a part (`hit` and `hit0`, `effect` and
+// `effect_ship`). Anything not listed -- icon*, level, req, action, info, common, summon,
+// afterimage, weapon, masterLevel -- is not a dyeable part and is never swapped, which is
+// what keeps the skill-window icon its own colour.
+//
+// THIS TABLE IS A WIRE CONTRACT: the server validates the part byte of actions 5/6 against
+// the same ids, and a mismatch stores a colour no client will ever draw.
+// ============================================================
+constexpr int kSkillPart_None       = 0;
+constexpr int kSkillPart_Effect     = 1;    // "effect" + any other "effect*" not below
+constexpr int kSkillPart_Effect0    = 2;
+constexpr int kSkillPart_Effect1    = 3;
+constexpr int kSkillPart_Effect2    = 4;
+constexpr int kSkillPart_Effect3    = 5;
+constexpr int kSkillPart_Ball       = 6;    // ball, ball0, ball1
+constexpr int kSkillPart_Hit        = 7;    // hit, hit0, hit1
+constexpr int kSkillPart_Affected   = 8;    // affected, affected0, specialAffected
+constexpr int kSkillPart_Special    = 9;
+constexpr int kSkillPart_Prepare    = 10;
+constexpr int kSkillPart_Keydown    = 11;   // keydown, keydown0
+constexpr int kSkillPart_KeydownEnd = 12;
+constexpr int kSkillPart_Repeat     = 13;
+constexpr int kSkillPart_Finish     = 14;
+constexpr int kSkillPart_Screen     = 15;
+constexpr int kSkillPart_Tile       = 16;
+constexpr int kSkillPart_Mob        = 17;   // mob, mob0
+constexpr int kSkillPartMin = kSkillPart_Effect;
+constexpr int kSkillPartMax = kSkillPart_Mob;
+constexpr int kSkillPartCount = kSkillPartMax;   // ids are 1..17, so an array needs +1
+
 // SKILLS NEED THEIR OWN BAND because skill ids collide head-on with equip ids: 1001003,
 // 2101005 and 4111004 all sit inside the equip range 1000000..1999999, so a raw skill id as
-// a tint key would dye a hat. Skill ids run to about 5xxxxxx, so 30000000 clears both the
-// equip band and the effect band above with room to spare.
-constexpr int kTintKey_SkillBias = 30000000;
-constexpr int kTintKey_SkillMax  = kTintKey_SkillBias + 9999999;
-inline bool IsSkillTintKey(int key) {
-    return key >= kTintKey_SkillBias && key <= kTintKey_SkillMax;
+// a tint key would dye a hat.
+//
+// key = (part + 1) * 100000000 + skillId. The stride has to clear EIGHT-digit ids: Cygnus
+// (Skill/1000..1512.img, 11001004) and Aran (Skill/2000..2112.img, 21001001) skills are
+// 8 digits, and the old +30M / +40M bands put a Cygnus body key inside the fx band and an Aran
+// key in no band at all. Part 1 starts at 200,000,000, clear of every equip, item-effect and
+// look key; part 17 tops out at 1,899,999,999, inside int32.
+constexpr int kTintKey_SkillPartStride = 100000000;
+constexpr int kTintKey_SkillPartMin    = 2 * kTintKey_SkillPartStride;
+inline bool IsSkillPartKey(int key) { return key >= kTintKey_SkillPartMin; }
+inline int  SkillPartKeyFor(int skillId, int part) {
+    return (part + 1) * kTintKey_SkillPartStride + skillId;
 }
-inline int  SkillTintKeyFor(int skillId) { return skillId + kTintKey_SkillBias; }
-inline int  SkillOfTintKey(int key) { return key - kTintKey_SkillBias; }
-
-// A skill's EFFECT nodes (`effect`, `effect0`, ...) carry a second tint, the same way
-// an item's glow does. Skill body keys occupy 30000000..39999999; this band sits
-// immediately above them. v83 skill ids top out around 5xxxxxx, so id + 40000000
-// cannot collide with a body key, an equip, or an item-effect key.
-constexpr int kTintKey_SkillFxBias = 40000000;
-constexpr int kTintKey_SkillFxMax  = kTintKey_SkillFxBias + 9999999;
-inline bool IsSkillFxTintKey(int key) {
-    return key >= kTintKey_SkillFxBias && key <= kTintKey_SkillFxMax;
+inline int  SkillOfPartKey(int key) { return key % kTintKey_SkillPartStride; }
+// Not range-checked: a caller that needs a real part tests kSkillPartMin..kSkillPartMax.
+inline int  PartOfPartKey(int key) { return key / kTintKey_SkillPartStride - 1; }
+inline bool IsSkillPartValid(int part) {
+    return part >= kSkillPartMin && part <= kSkillPartMax;
 }
-inline int  SkillFxTintKeyFor(int skillId) { return skillId + kTintKey_SkillFxBias; }
-inline int  SkillOfFxTintKey(int key) { return key - kTintKey_SkillFxBias; }
 
 // Custom opcode pair from a private 0x372x block, following an even/odd
 // request/reply convention.
@@ -233,24 +267,27 @@ bool WeaponTint_ClearCanvas(void* pCanvas, int w, int h);
 // second layer to dye, and the window greys its glow chip. Cached per item id.
 bool WeaponTint_ItemHasEffectArt(int itemId);
 
-// Does this skill img carry caster VFX named `effect`, `effect0`, ... as a direct
-// child of Skill/<job>.img/skill/<id>? False greys the Skills-tab glow chip: some
-// skills have no effect art at all. Cached per skill id.
-bool WeaponTint_SkillHasEffectArt(int skillId);
+// --- skill parts (see kSkillPart_* above) ------------------------------------
+// The part a direct child of Skill/<img>/skill/<id> belongs to, or kSkillPart_None for a
+// name that is not dyeable art. Case-sensitive, exactly as the contract names them.
+int WeaponTint_SkillPartOfChild(const wchar_t* name);
 
-// True when the Skills tab should show the item/glow chips: more than one `effect*`
-// child (`effect0` and up) and/or a `ball` projectile node. A skill with only
-// `effect` has one colour and no chips.
-bool WeaponTint_SkillHasSplitLayers(int skillId);
-bool WeaponTint_SkillHasExtraEffect(int skillId);
-bool WeaponTint_SkillHasBall(int skillId);
+// The DYEABLE parts this skill actually has, ascending: a part is listed only when at least
+// one of its nodes holds a canvas somewhere below it. Returns how many were written (at most
+// cap). Cached per skill id.
+int WeaponTint_ListSkillParts(int skillId, int partsOut[], int cap);
+bool WeaponTint_SkillHasPart(int skillId, int part);
 
-// `effect0` / `effect1` / ... or `ball` -- the glow chip's half when the skill splits.
-bool WeaponTint_SkillPartIsGlow(const wchar_t* name);
+// Every direct child of the skill node that maps to a listed part, in the node's own order,
+// as (part, child name). A part can own several children (`hit` + `hit0`). Cached per skill.
+struct WeaponTintSkillChild {
+    int     part = kSkillPart_None;
+    wchar_t name[24] = {};
+};
+int WeaponTint_ListSkillPartChildren(int skillId, WeaponTintSkillChild out[], int cap);
 
-// Writes up to maxNames of preview-node names (`effect*`, then `ball` if present)
-// into names[i] (each a 16-wchar buffer). Returns how many were written.
-int WeaponTint_ListSkillEffectParts(int skillId, wchar_t names[][16], int maxNames);
+// "Effect", "Effect 0", ..., "Keydown End", "Mob"; L"" for an unknown part.
+const wchar_t* WeaponTint_SkillPartLabel(int part);
 
 int WeaponTint_BaseWeaponIdOf(void* pAvatar);
 
@@ -308,8 +345,9 @@ void WeaponTint_SendRestore(const WeaponTintTarget& target, int prismPos, int la
 // that demands a Cash equip at a given inventory position.
 // Skills tab. A skill is named by its ID: it has no inventory address for the server to
 // re-derive it from, so the server verifies instead that the character knows the skill.
-void WeaponTint_SendApplySkill(int skillId, const WeaponTint& t, int prismPos, int layer);
-void WeaponTint_SendRestoreSkill(int skillId, int prismPos, int layer);
+// `part` is a kSkillPart_* id (1..17) and is REQUIRED: the trailing byte of actions 5 / 6.
+void WeaponTint_SendApplySkill(int skillId, const WeaponTint& t, int prismPos, int part);
+void WeaponTint_SendRestoreSkill(int skillId, int prismPos, int part);
 
 void WeaponTint_SendApplyLook(int kind, const WeaponTint& t, int prismPos);
 void WeaponTint_SendRestoreLook(int kind, int prismPos);

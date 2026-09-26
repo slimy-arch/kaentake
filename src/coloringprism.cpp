@@ -262,7 +262,8 @@ bool IsDyeableEquip(int itemId) {
 //   BtOK/{normal,pressed,mouseOver,disabled}
 //   BtReset/{normal,pressed,mouseOver,disabled}
 //   BtClose/{normal,pressed,mouseOver}
-//   LayerBt/{item,glow}/{normal,on,off}          the two 14px layer chips
+//   LayerBt/{item,glow}/{normal,on,off}          the Items tab's two 14px layer chips
+// The Skills tab's PART PILLS have no art: they are drawn at runtime (see DrawPartPills).
 #define CP_ART L"Custom/UI/UIWindow.img/ColorPrism/"
 
 // Shared by every layout: not art-dependent.
@@ -440,19 +441,53 @@ constexpr int kNoActionCode = -1;
 // How long a skill effect stays on screen in the pane once a cast begins. The swing pose is
 // often shorter than the effect, so tying the two together cut longer skills off part way.
 
-// What the preview plays: every direct child of the skill img named `effect`,
-// `effect0`, `effect1`, ... Some skills have several of those, some have none.
+// What the preview plays: EVERY dyeable part the skill has (weapontint.h's kSkillPart_*
+// table), each in its own colour, so the pane shows every colour the player has picked and
+// not just the one the sliders are on. Discovered from the WZ per skill, because which parts
+// a skill carries varies: a table naming only `effect` silently dropped the rest.
 //
-// Deliberately NOT `affected`, which is the RECIPIENT's art: the client's own hardcoded
-// `Skill/MobSkill.img/%03d/level/%d/affected` is what an affected PLAYER wears when a mob skill
-// lands, and every party buff checked (Iron Will, Hyper Body, Bless, Dispel) carries it
-// alongside `effect` precisely because party members show it. Not `special` either, which holds
-// big set-piece art (a 207x236 stag among them) a caster never sees on themselves.
+// A part is played LAYER BY LAYER. Most parts hold their frames directly (`effect/0..n`), but
+// this Data tree also nests them one level deeper (`Skill/112.img/skill/1121008/effect/0/<n>`
+// and `effect/1/<n>`, two layers of Brandish), and `hit` is nearly always `hit/0/<n>`. A part
+// whose child "0" is a folder is therefore a SET OF LAYERS, and every one of them plays.
 //
-// Discovered from the WZ rather than a hardcoded table, because which of `effect` /
-// `effect0` / `ball` a skill actually carries is per-skill, and a table that only names
-// `effect` silently dropped the rest.
-constexpr int kSkillFxNodeMax = 16;
+// One slot per layer, so it has to cover layers x parts: Meteor alone is effect + effect0 +
+// hit + nine `tile` layers.
+constexpr int kSkillFxNodeMax = 32;
+
+// Where each part plays, measured from the cast. The avatar parts sit on the character the way
+// they always did; the rest approximate the world closely enough to judge a colour by.
+enum FxPlace { kPlaceAvatar = 0, kPlaceBall, kPlaceTarget, kPlaceCentre };
+constexpr DWORD kFxTargetDelayMs = 250;   // hit / mob: the damage comes back after the swing
+constexpr DWORD kFxBallFlightMs  = 600;   // how long a projectile flies, its frames looping
+constexpr float kFxBallPxPerMs   = 0.35f;
+constexpr int   kFxTargetReach   = 110;   // where the "mob" stands, in front of the caster
+constexpr int   kFxChestRise     = 30;    // projectiles and hits fly at chest height, not feet
+
+int PlaceOfPart(int part) {
+    switch (part) {
+        case kSkillPart_Ball:   return kPlaceBall;
+        case kSkillPart_Hit:
+        case kSkillPart_Mob:    return kPlaceTarget;
+        case kSkillPart_Screen:
+        case kSkillPart_Tile:   return kPlaceCentre;
+        default:                return kPlaceAvatar;   // effect*, special, prepare, keydown,
+                                                       // keydownend, repeat, finish, affected
+    }
+}
+
+// The part pills along the top of the preview pane (Skills tab). Runtime-drawn, no art.
+constexpr int kPillH = 15, kPillPadX = 5, kPillGap = 3, kPillInsetX = 4, kPillInsetY = 3;
+constexpr unsigned int kPillFillOn = 0xFF1E5A78, kPillBorderOn = 0xFF6FE8FF;
+
+// A part's label as the narrow string the window's text path takes. The labels are ASCII.
+void PartLabelA(int part, char* out, size_t cap) {
+    if (!out || cap == 0) return;
+    const wchar_t* w = WeaponTint_SkillPartLabel(part);
+    size_t i = 0;
+    for (; w && w[i] && i + 1 < cap; ++i) out[i] = static_cast<char>(w[i] < 0x80 ? w[i] : '?');
+    out[i] = 0;
+}
 
 // THE PREVIEW LAYER MUST NOT OUTLIVE THE CLONES IT WAS BUILT FROM.
 //
@@ -505,6 +540,7 @@ void SehUpdateAvatar(void* pAvatar);
 void MoveAvatar(void* pAvatar, int x, int y);
 void StackRaise(CWnd* pWnd);
 void StackRemove(CWnd* pWnd);
+int  TextWidth(IWzFont* pFont, const char* s);
 
 // Match the preview's controls to the player's actual key bindings.
 constexpr uintptr_t kAddr_FuncKeyMappedMan = 0x00BED5A0;
@@ -803,6 +839,16 @@ public:
     // sitting on the sliders, so the preview snapped back to vanilla.
     WeaponTint m_pendingTint[2];
     bool       m_pendingSet[2];
+    // SKILLS TAB: the dyeable parts of the skill on the well (ascending kSkillPart_* ids), the
+    // one the sliders edit, and the same uncommitted-edit memory the chips have, per part.
+    // Indexed by part id, so [0] is unused. The selected part's live value is m_tint itself;
+    // its slot here is only written when the player moves to another pill.
+    int        m_parts[kSkillPartCount];
+    int        m_nParts;
+    int        m_part;                               // kSkillPart_None until a skill lands
+    WeaponTint m_partTint[kSkillPartCount + 1];
+    bool       m_partSet[kSkillPartCount + 1];
+    int        m_pillHover;                          // index into m_parts, or -1
 
     // Preview playground: the avatar walks, jumps and swings under the player's own keys.
     int  m_bFocused;
@@ -836,22 +882,31 @@ public:
     // The skill effect the pane is playing. Deliberately NOT a Gr2D layer: see the note on
     // DrawSkillFx. The nodes are WZ-owned and outlive us; the frame cursors are ours.
     //
-    // One entry per effect* child the skill img actually has. They run SIDE BY SIDE rather
-    // than in sequence, so each keeps its own cursor and its own origin.
+    // One entry per LAYER of every dyeable part (see kSkillFxNodeMax). They run SIDE BY SIDE
+    // rather than in sequence, so each keeps its own cursor, clock and origin.
     struct SkillFx {
-        wchar_t        name[16] = {};
-        IWzPropertyPtr node;
+        int            part = kSkillPart_None;
+        int            place = kPlaceAvatar;
+        IWzPropertyPtr node;                         // the layer's frames: node/0, node/1, ...
+        IWzCanvasPtr   single;                       // or: the part node IS one canvas
+        int            spread = 0;                   // px offset for side-by-side tile layers
         // Tinted and HELD. Holding our own reference is what makes this safe: the clone cache
         // may evict this colour at any moment, and a borrowed pointer would be freed
         // underneath the blit.
         IWzCanvasPtr   frame;
         int            index = 0;
-        DWORD          at = 0;
-        int            ox = 0, oy = 0;
+        DWORD          start = 0;                    // when this layer begins (hit waits)
+        DWORD          at = 0;                       // when the current frame began
+        bool           done = true;
+        int            dx = 0, dy = 0;               // top-left in chrome px, set by Update
     };
     SkillFx        m_skillFx[kSkillFxNodeMax];
     int            m_nSkillFxCount;
     int            m_nSkillFxNodeId;
+    // The cast the pane is playing: where and which way the avatar was when attack was pressed.
+    // A projectile and a hit are anchored to THAT, not to an avatar that may since have walked.
+    float          m_castX, m_castY;
+    bool           m_castLeft;
     IWzGr2DLayer* m_pEffectLayer;
     int m_nEffectItem;                 // what it was built for, 0 = nothing
     int m_nEffectMA, m_nEffectCode;    // and for which pose
@@ -920,7 +975,7 @@ public:
     virtual int  OnMouseWheel(int, int, int) override { return 1; }
     virtual void OnMouseEnter(int bEnter) override {
         CWnd::OnMouseEnter(bEnter);
-        if (!bEnter) { m_nBtnHover = -1; m_nCloseHover = 0; m_thumbHover = -1; }
+        if (!bEnter) { m_nBtnHover = -1; m_nCloseHover = 0; m_thumbHover = -1; m_pillHover = -1; }
     }
     virtual void OnDestroy() override;
     virtual void Update() override;
@@ -1038,49 +1093,29 @@ public:
     // glow and nothing else, so it answers GLOW whatever the chip says -- pointing at the bare
     // item id for one would make a dropped cash effect look like the window had stopped working.
     bool DyeingGlow() const {
-        if (m_tab == kTabSkill && m_target.skillId) {
-            return ShowingChips() && m_layer == kChipGlow;
-        }
-        if (!m_target.itemId) return false;
+        if (m_tab != kTabItem || !m_target.itemId) return false;
         if (IsCashEffectItemId(m_target.itemId)) return true;
         return m_layer == kChipGlow;
     }
+    // The item / glow chips are an ITEMS-tab control. A skill has up to seventeen parts, not
+    // two, and picks among them with the part pills instead (see DrawPartPills).
     bool ShowingChips() const {
-        if (m_tab == kTabItem && m_target.itemId) return true;
-        // Skills only grow a second chip when there is a second thing to dye:
-        // another effect node (`effect0`, ...) and/or a `ball` projectile.
-        if (m_tab == kTabSkill && m_target.skillId)
-            return WeaponTint_SkillHasSplitLayers(m_target.skillId);
-        return false;
+        return m_tab == kTabItem && m_target.itemId;
     }
-    // Does the dropped target have a second layer at all? Both answers are structural rather
-    // than a preference: a cash effect has no sprite, most equips have no glow, and some
-    // skills have no `effect` / `effect0` / ... child.
+    // Does the dropped item have a second layer at all? Both answers are structural rather
+    // than a preference: a cash effect has no sprite, and most equips have no glow.
     bool HasGlowLayer() const {
-        if (m_tab == kTabSkill && m_target.skillId)
-            return WeaponTint_SkillHasSplitLayers(m_target.skillId);
         if (!m_target.itemId) return false;
         return IsCashEffectItemId(m_target.itemId)
             || WeaponTint_ItemHasEffectArt(m_target.itemId);
     }
     bool HasItemLayer() const {
-        if (m_tab == kTabSkill && m_target.skillId)
-            return WeaponTint_SkillHasSplitLayers(m_target.skillId);
         return m_target.itemId && !IsCashEffectItemId(m_target.itemId);
     }
-    // Force the selection onto a layer the target actually has. Called whenever the well
-    // changes: dropping a plain equip (or a skill with no extra effect art) while Glow was
-    // selected would otherwise leave the sliders pointed at a key nothing will ever draw.
+    // Force the selection onto a layer the item actually has. Called whenever the well
+    // changes: dropping a plain equip while Glow was selected would otherwise leave the
+    // sliders pointed at a key nothing will ever draw.
     void SnapLayer() {
-        if (m_tab == kTabSkill && m_target.skillId) {
-            if (!WeaponTint_SkillHasSplitLayers(m_target.skillId)) {
-                m_layer = kChipItem;
-                return;
-            }
-            if (m_layer == kChipGlow && !HasGlowLayer()) m_layer = kChipItem;
-            if (m_layer == kChipItem && !HasItemLayer()) m_layer = kChipGlow;
-            return;
-        }
         if (!m_target.itemId) { m_layer = kChipItem; return; }
         if (m_layer == kChipGlow && !HasGlowLayer()) m_layer = kChipItem;
         if (m_layer == kChipItem && !HasItemLayer()) m_layer = kChipGlow;
@@ -1091,9 +1126,9 @@ public:
             case kTabItem:    return !m_target.itemId ? 0
                                    : DyeingGlow() ? EffectTintKeyFor(m_target.itemId)
                                                   : m_target.itemId;
-            case kTabSkill:   return !m_target.skillId ? 0
-                                   : DyeingGlow() ? SkillFxTintKeyFor(m_target.skillId)
-                                                  : SkillTintKeyFor(m_target.skillId);
+            // One key PER PART (weapontint.h), so the pill picks the key.
+            case kTabSkill:   return (!m_target.skillId || !IsSkillPartValid(m_part)) ? 0
+                                   : SkillPartKeyFor(m_target.skillId, m_part);
             case kTabHair:    return kTintKey_Hair;
             case kTabSkin:    return kTintKey_Skin;
             default:          return kTintKey_Face;   // kTabEye -- the FACE img is where an
@@ -1101,25 +1136,81 @@ public:
                                                       // pixels are actually recoloured.
         }
     }
-    // Colour for one skill preview node. The live sliders drive the selected chip;
-    // the other chip keeps any uncommitted value so switching to ball does not
-    // snap the main effect back to vanilla.
-    WeaponTint TintForSkillPart(const wchar_t* name) const {
-        if (!m_target.skillId) return m_tint;
-        if (!WeaponTint_SkillHasSplitLayers(m_target.skillId)) return m_tint;
-        const bool glowPart = WeaponTint_SkillPartIsGlow(name);
-        const int chip = glowPart ? kChipGlow : kChipItem;
-        if (m_layer == chip) return m_tint;
-        if (m_pendingSet[chip]) return m_pendingTint[chip];
-        return WeaponTint_GetSavedFor(glowPart
-            ? SkillFxTintKeyFor(m_target.skillId)
-            : SkillTintKeyFor(m_target.skillId));
+    // Colour for one skill part in the preview. The live sliders drive the selected pill;
+    // every other part shows its uncommitted value from this session if it has one, else its
+    // stored colour -- so moving to Ball does not snap the Effect just tried back to vanilla.
+    WeaponTint TintForPart(int part) const {
+        if (!m_target.skillId || !IsSkillPartValid(part)) return WeaponTint{};
+        if (part == m_part) return m_tint;
+        if (m_partSet[part]) return m_partTint[part];
+        return WeaponTint_GetSavedFor(SkillPartKeyFor(m_target.skillId, part));
     }
     void ClearPendingLayers() {
         m_pendingSet[0] = m_pendingSet[1] = false;
+        for (int p = 0; p <= kSkillPartCount; ++p) m_partSet[p] = false;
     }
-    // Is there something for Confirm to act on?
-    bool Ready() const { return !NeedsDrop() || m_target.IsSet(); }
+    // Is there something for Confirm to act on? Per tab: a skill needs a part to dye (a skill
+    // with none leaves OK disabled), and a target dropped on one drop tab is not a target for
+    // the other -- an item on the well is no skill id, and vice versa.
+    bool Ready() const {
+        if (!NeedsDrop()) return true;
+        if (m_tab == kTabSkill) return m_target.skillId > 0 && IsSkillPartValid(m_part);
+        return m_target.itemId > 0;
+    }
+
+    // The parts of the skill on the well, re-read from the (cached) WZ answer. Selects the
+    // first one; the pills move it from there.
+    void LoadSkillParts() {
+        m_nParts = m_target.skillId
+                 ? WeaponTint_ListSkillParts(m_target.skillId, m_parts, kSkillPartCount) : 0;
+        m_part = m_nParts ? m_parts[0] : kSkillPart_None;
+        m_pillHover = -1;
+    }
+    // Clear the live preview on every part of the skill on the well.
+    void DropSkillPreview() {
+        if (!m_target.skillId) return;
+        for (int i = 0; i < m_nParts; ++i)
+            WeaponTint_SetPreview(SkillPartKeyFor(m_target.skillId, m_parts[i]), WeaponTint{},
+                                  false);
+    }
+    // A pill was clicked: park the outgoing part's slider value, load the incoming one's.
+    void SelectPart(int part) {
+        if (!IsSkillPartValid(part) || part == m_part) return;
+        CommitValueEdit();
+        if (IsSkillPartValid(m_part)) {
+            m_partTint[m_part] = m_tint;
+            m_partSet[m_part] = true;
+        }
+        m_part = part;
+        m_tint = m_partSet[part] ? m_partTint[part] : WeaponTint_GetSavedFor(TargetKey());
+        m_bAvatarDirty = true;
+        play_ui_sound(L"BtMouseClick");
+        InvalidateRect(nullptr);
+    }
+    bool ShowingPills() const {
+        return m_tab == kTabSkill && m_target.skillId > 0 && m_nParts > 0;
+    }
+    // Pill rects in chrome px, laid out left to right along the top of the preview pane and
+    // wrapping onto further rows. Measured with the pill font, so hit-testing and drawing
+    // agree exactly. Returns how many were laid out.
+    int PillRects(RECT out[], int cap) const {
+        IWzFont* pf = m_pFontTip ? static_cast<IWzFont*>(m_pFontTip) : static_cast<IWzFont*>(m_pFont);
+        const int left = kLayout.previewL + kPillInsetX, right = kLayout.previewR - kPillInsetX;
+        int x = left, y = kLayout.previewT + kPillInsetY, n = 0;
+        for (int i = 0; i < m_nParts && n < cap; ++i) {
+            char label[24];
+            PartLabelA(m_parts[i], label, sizeof(label));
+            const int w = TextWidth(pf, label) + 2 * kPillPadX;
+            if (x > left && x + w > right) {
+                x = left;
+                y += kPillH + kPillGap;
+            }
+            out[n++] = RECT{ x, y, x + w, y + kPillH };
+            x += w + kPillGap;
+        }
+        return n;
+    }
+    void DrawPartPills(IWzCanvasPtr pCanvas, IWzFont* pfOn, IWzFont* pfOff) const;
 
     void SetTab(int tab) {
         CommitValueEdit();
@@ -1146,10 +1237,7 @@ public:
             WeaponTint_SetPreview(m_target.itemId, WeaponTint{}, false);
             WeaponTint_SetPreview(EffectTintKeyFor(m_target.itemId), WeaponTint{}, false);
         }
-        if (m_target.skillId) {
-            WeaponTint_SetPreview(SkillTintKeyFor(m_target.skillId), WeaponTint{}, false);
-            WeaponTint_SetPreview(SkillFxTintKeyFor(m_target.skillId), WeaponTint{}, false);
-        }
+        DropSkillPreview();
     }
 
     void ApplyPlayPose(int moveAction, int actionCode) {
@@ -1359,6 +1447,8 @@ public:
     void ReleaseAvatar();
     void ReleaseEffect();
     void RefreshEffect();
+    void LoadSkillFx();
+    static IWzCanvasPtr SkillFxFrame(const SkillFx& fx, int index);
     // Offsets move the effect into the target canvas; l/t/r/b clip it there. Called twice per
     // Draw: once into the chrome, once for the four margin bands around it.
     void DrawSkillFx(IWzCanvasPtr pCanvas, int ox, int oy, int l, int t, int r, int b,
@@ -1405,9 +1495,12 @@ public:
     bool SetSkillTarget(int skillId) {
         CommitValueEdit();
         if (skillId <= 0) return false;
-        if (m_target.skillId && m_target.skillId != skillId) {
-            WeaponTint_SetPreview(SkillTintKeyFor(m_target.skillId), WeaponTint{}, false);
-            WeaponTint_SetPreview(SkillFxTintKeyFor(m_target.skillId), WeaponTint{}, false);
+        if (m_target.skillId && m_target.skillId != skillId) DropSkillPreview();
+        if (m_target.itemId) {
+            // The two drop tabs share one target, and an item left on it would keep its
+            // preview while the sliders moved on to the skill.
+            WeaponTint_SetPreview(m_target.itemId, WeaponTint{}, false);
+            WeaponTint_SetPreview(EffectTintKeyFor(m_target.itemId), WeaponTint{}, false);
         }
         m_target.invType = 0;
         m_target.invPos  = 0;
@@ -1416,8 +1509,13 @@ public:
         if (m_tab != kTabSkill) SetTab(kTabSkill);
         SnapLayer();
         ClearPendingLayers();
+        LoadSkillParts();
+        if (!m_nParts) {
+            LOG_ONCE_PER_ID(skillId, "coloringprism: skill %d has no dyeable parts", skillId);
+        }
         m_tint = WeaponTint_GetSavedFor(TargetKey());
         ReleaseEffect();                 // the pane must rebuild for the new skill
+        m_nSkillFxNodeId = 0;            // ...and so must the effect list, even for the same id
         m_bAvatarDirty = true;
         play_ui_sound(L"DragEnd");
         InvalidateRect(nullptr);
@@ -1453,6 +1551,14 @@ public:
             // Swapping targets mid-session: drop the outgoing item's preview so it
             // does not keep the colour we were trying on it.
             WeaponTint_SetPreview(m_target.itemId, WeaponTint{}, false);
+        }
+        // An item replaces a skill on the well, never sits beside it: the struct treats the
+        // two as mutually exclusive, and a stale skill id made the Items tab draw its icon.
+        if (m_target.skillId) {
+            DropSkillPreview();
+            m_target.skillId = 0;
+            m_nParts = 0;
+            m_part = kSkillPart_None;
         }
         m_target.invType = invType;
         m_target.invPos  = invPos;
@@ -1853,9 +1959,11 @@ CUIColorPrism::CUIColorPrism(int nLeft, int nTop)
       m_velX(0.0f), m_velY(0.0f), m_bAirborne(false), m_bFacingLeft(false),
       m_bAttackReq(false), m_tLastStep(GetTickCount()), m_nLastMA(-1), m_nLastCode(-2),
       m_layer(kChipItem), m_chipHover(-1),
+      m_nParts(0), m_part(kSkillPart_None), m_pillHover(-1),
       m_nSkillIconId(0), m_bSkillFxPlaying(false), m_bFxTrigger(false),
       m_nSkillFxCount(0),
       m_nSkillFxNodeId(0),
+      m_castX(0.0f), m_castY(0.0f), m_castLeft(false),
       m_pEffectLayer(nullptr), m_nEffectItem(0), m_nEffectMA(-1), m_nEffectCode(kNoActionCode),
       m_bDragging(0), m_nDragAnchorX(0), m_nDragAnchorY(0),
       m_sliderDrag(-1), m_sliderGrabDX(0),
@@ -1873,6 +1981,8 @@ CUIColorPrism::CUIColorPrism(int nLeft, int nTop)
     // The Hair, Eyes and Skin tabs need no target at all, so they are usable immediately.
     m_target = WeaponTintTarget{};
     m_pendingSet[0] = m_pendingSet[1] = false;
+    for (int p = 0; p <= kSkillPartCount; ++p) m_partSet[p] = false;
+    for (int i = 0; i < kSkillPartCount; ++i) m_parts[i] = kSkillPart_None;
     m_tint = WeaponTint_GetSavedFor(TargetKey());
 
     LoadSprites();
@@ -1975,27 +2085,133 @@ void CUIColorPrism::DrawSkillFx(IWzCanvasPtr pCanvas, int ox, int oy,
     for (int i = 0; i < m_nSkillFxCount; ++i) {
         const SkillFx& fx = m_skillFx[i];
         if (!fx.frame) continue;
+        // Placed by RefreshEffect, which knows each part's anchor (avatar, projectile, target
+        // or pane centre) and has already folded the facing into the offset.
+        //
+        // TRUE SIZE. Shrinking it to fit would preview the wrong SIZE, which is half of
+        // what an effect is, so it runs over the chrome and on into the margin the way it
+        // would cover the screen in game. Clipping needs no repositioning either, so the
+        // effect stays anchored to the character rather than nudged around to fit.
+        BlitAClipped(pCanvas, fx.frame, ox + fx.dx, oy + fx.dy, l, t, r, b, alpha);
+    }
+}
+
+// The pills that pick which PART of the skill the sliders dye. Runtime-drawn in the "Prism
+// Glass" style: unselected pills wear the tooltip's navy glass, the selected one a brighter
+// cyan. Drawn AFTER the effect so a big frame never hides the control that is dyeing it.
+void CUIColorPrism::DrawPartPills(IWzCanvasPtr pCanvas, IWzFont* pfOn, IWzFont* pfOff) const {
+    if (!pCanvas || !ShowingPills()) return;
+    RECT rc[kSkillPartCount];
+    const int n = PillRects(rc, kSkillPartCount);
+    for (int i = 0; i < n; ++i) {
+        const bool sel = (m_parts[i] == m_part);
+        const bool hover = (i == m_pillHover);
+        const unsigned int fill = sel ? kPillFillOn : kLayout.tipFill;
+        const unsigned int edge = sel ? kPillBorderOn
+                                : (hover ? kLayout.colReadout : kLayout.tipBorder);
+        const int x = rc[i].left, y = rc[i].top;
+        const int w = rc[i].right - rc[i].left, h = rc[i].bottom - rc[i].top;
         try {
-            int w = 0;
-            try { w = static_cast<int>(fx.frame->width); } catch (...) {}
-            if (w <= 0) continue;
+            pCanvas->raw_DrawRectangle(x, y, w, h, fill);
+            pCanvas->raw_DrawRectangle(x, y, w, 1, edge);
+            pCanvas->raw_DrawRectangle(x, y + h - 1, w, 1, edge);
+            pCanvas->raw_DrawRectangle(x, y, 1, h, edge);
+            pCanvas->raw_DrawRectangle(x + w - 1, y, 1, h, edge);
+        } catch (...) {
+        }
+        char label[24];
+        PartLabelA(m_parts[i], label, sizeof(label));
+        DrawTextCentred(pCanvas, sel ? pfOn : pfOff, x, w, y + (h - kLayout.fontH) / 2, label);
+    }
+}
 
-            // FACING. The origin is the anchor point on the character, so subtracting it puts
-            // the sprite where the avatar is. A mirrored frame carries that anchor on the far
-            // edge, so it is measured from there instead.
-            const int x = ox + (EffectNeedsMirror()
-                        ? static_cast<int>(m_avX) - (w - fx.ox)
-                        : static_cast<int>(m_avX) - fx.ox);
-            const int y = oy + static_cast<int>(m_avY) - fx.oy;
+// Frame `index` of one preview layer, or null past its end. A layer is either a node of
+// numbered frames or, for a part that is itself one canvas, just that canvas at index 0.
+IWzCanvasPtr CUIColorPrism::SkillFxFrame(const SkillFx& fx, int index) {
+    if (fx.single) return index == 0 ? fx.single : IWzCanvasPtr();
+    if (!fx.node || index < 0) return nullptr;
+    wchar_t idx[12];
+    _snwprintf_s(idx, _countof(idx), _TRUNCATE, L"%d", index);
+    Ztl_variant_t v = fx.node->item[idx];
+    IUnknownPtr pUnk = get_unknown(v);
+    IWzCanvasPtr pFrame;
+    if (pUnk) pUnk.QueryInterface(__uuidof(IWzCanvas), &pFrame);
+    return pFrame;
+}
 
-            // TRUE SIZE. Shrinking it to fit would preview the wrong SIZE, which is half of
-            // what an effect is, so it runs over the chrome and on into the margin the way it
-            // would cover the screen in game. Clipping needs no repositioning either, so the
-            // effect stays anchored to the character rather than nudged around to fit.
-            BlitAClipped(pCanvas, fx.frame, x, y, l, t, r, b, alpha);
+// Every layer of every dyeable part of the skill on the well, into m_skillFx.
+//
+// A part node is one of three shapes, told apart canvas-first (a canvas can also answer as a
+// property, and descending into it finds only origin / delay):
+//   * a canvas                        -- one frame
+//   * frames: node/0, node/1, ...     -- one layer
+//   * layers: node/0/0.., node/1/0..  -- this tree's nested shape; each numbered folder with a
+//                                        canvas at /0 is a layer, and all of them play
+// `tile` layers are alternatives the game scatters over the ground, so they are spread across
+// the pane rather than stacked on one spot.
+void CUIColorPrism::LoadSkillFx() {
+    for (int i = 0; i < kSkillFxNodeMax; ++i) m_skillFx[i] = SkillFx();
+    m_nSkillFxCount = 0;
+    if (!m_target.skillId) return;
+    WeaponTintSkillChild kids[kSkillFxNodeMax];
+    const int nKids = WeaponTint_ListSkillPartChildren(m_target.skillId, kids, kSkillFxNodeMax);
+    auto canvasOf = [](IUnknownPtr u) -> IWzCanvasPtr {
+        IWzCanvasPtr c;
+        if (u) u.QueryInterface(__uuidof(IWzCanvas), &c);
+        return c;
+    };
+    auto propertyOf = [](IUnknownPtr u) -> IWzPropertyPtr {
+        IWzPropertyPtr p;
+        if (u) u.QueryInterface(__uuidof(IWzProperty), &p);
+        return p;
+    };
+    auto add = [this](int part, IWzPropertyPtr node, IWzCanvasPtr single) {
+        if (m_nSkillFxCount >= kSkillFxNodeMax) return;
+        SkillFx& fx = m_skillFx[m_nSkillFxCount++];
+        fx.part = part;
+        fx.place = PlaceOfPart(part);
+        fx.node = node;
+        fx.single = single;
+    };
+    for (int k = 0; k < nKids; ++k) {
+        try {
+            wchar_t path[160];
+            _snwprintf_s(path, _countof(path), _TRUNCATE, L"Skill/%03d.img/skill/%07d/%s",
+                         m_target.skillId / 10000, m_target.skillId, kids[k].name);
+            Ztl_variant_t vPart = get_rm()->GetObjectA(path);
+            IUnknownPtr pPart = get_unknown(vPart);
+            if (!pPart) continue;
+            if (IWzCanvasPtr c = canvasOf(pPart)) { add(kids[k].part, nullptr, c); continue; }
+            IWzPropertyPtr pNode = propertyOf(pPart);
+            if (!pNode) continue;
+            Ztl_variant_t v0 = pNode->item[L"0"];
+            IUnknownPtr p0 = get_unknown(v0);
+            if (canvasOf(p0)) { add(kids[k].part, pNode, nullptr); continue; }
+            if (!propertyOf(p0)) continue;           // no frame 0 at all: nothing to play
+            const int first = m_nSkillFxCount;
+            for (int layer = 0; layer < kSkillFxNodeMax; ++layer) {
+                wchar_t idx[12];
+                _snwprintf_s(idx, _countof(idx), _TRUNCATE, L"%d", layer);
+                Ztl_variant_t vl = pNode->item[idx];
+                IUnknownPtr pl = get_unknown(vl);
+                if (!pl) break;
+                IWzPropertyPtr pLayer = propertyOf(pl);
+                if (!pLayer || canvasOf(pl)) continue;
+                Ztl_variant_t vf = pLayer->item[L"0"];
+                IUnknownPtr pf = get_unknown(vf);
+                if (canvasOf(pf)) add(kids[k].part, pLayer, nullptr);
+            }
+            if (kids[k].part == kSkillPart_Tile) {
+                const int n = m_nSkillFxCount - first;
+                const int span = kLayout.previewR - kLayout.previewL - 40;
+                const int step = (n > 1) ? (span / n < 60 ? span / n : 60) : 0;
+                for (int i = 0; i < n; ++i) m_skillFx[first + i].spread = (2 * i - (n - 1)) * step / 2;
+            }
         } catch (...) {
         }
     }
+    LOG_ONCE_PER_ID(m_target.skillId, "coloringprism: skill %d preview: %d layer(s) over %d "
+                    "part node(s)", m_target.skillId, m_nSkillFxCount, nKids);
 }
 
 void CUIColorPrism::RefreshEffect() {
@@ -2008,22 +2224,7 @@ void CUIColorPrism::RefreshEffect() {
         const DWORD now = GetTickCount();
         if (m_nSkillFxNodeId != m_target.skillId) {
             m_nSkillFxNodeId = m_target.skillId;
-            wchar_t parts[kSkillFxNodeMax][16] = {};
-            m_nSkillFxCount = WeaponTint_ListSkillEffectParts(m_target.skillId, parts,
-                                                             kSkillFxNodeMax);
-            for (int i = 0; i < kSkillFxNodeMax; ++i) m_skillFx[i] = SkillFx();
-            for (int i = 0; i < m_nSkillFxCount; ++i) {
-                try {
-                    wcsncpy_s(m_skillFx[i].name, _countof(m_skillFx[i].name),
-                              parts[i], _TRUNCATE);
-                    wchar_t path[160];
-                    _snwprintf_s(path, _countof(path), _TRUNCATE,
-                                 L"Skill/%03d.img/skill/%07d/%s",
-                                 m_target.skillId / 10000, m_target.skillId,
-                                 parts[i]);
-                    m_skillFx[i].node = get_rm()->GetObjectA(path).GetUnknown();
-                } catch (...) {}
-            }
+            LoadSkillFx();
             m_bSkillFxPlaying = false;
             m_bFxTrigger      = false;
         }
@@ -2033,10 +2234,17 @@ void CUIColorPrism::RefreshEffect() {
         // fires exactly once.
         if (m_bFxTrigger) {
             m_bFxTrigger      = false;
-            m_bSkillFxPlaying = true;
+            m_bSkillFxPlaying = m_nSkillFxCount > 0;
+            m_castX = m_avX;
+            m_castY = m_avY;
+            m_castLeft = m_bFacingLeft;
             for (int i = 0; i < m_nSkillFxCount; ++i) {
-                m_skillFx[i].index = 0;
-                m_skillFx[i].at    = now;
+                SkillFx& fx = m_skillFx[i];
+                fx.index = 0;
+                fx.start = now + (fx.place == kPlaceTarget ? kFxTargetDelayMs : 0);
+                fx.at    = fx.start;
+                fx.done  = false;
+                fx.frame = nullptr;
             }
         }
 
@@ -2044,27 +2252,29 @@ void CUIColorPrism::RefreshEffect() {
         // lock, unlock -- and doing it re-entrantly while the client is painting is what made
         // the preview render for a moment and then die. Draw now only blits.
         //
-        // The EFFECT key, always: this blit is the glow. While the body chip is selected the
-        // sliders drive the skill itself and this preview keeps the stored effect colour --
-        // or the uncommitted colour if the other chip was edited in this session.
-        const bool splits = WeaponTint_SkillHasSplitLayers(m_target.skillId);
-        int running = 0;                      // nodes still holding a cursor this pass
+        // Every layer takes ITS OWN PART's colour (TintForPart): the selected pill follows the
+        // sliders, the others show their uncommitted or stored colour.
+        const int dir = m_castLeft ? -1 : 1;
         for (int i = 0; i < m_nSkillFxCount; ++i) {
             SkillFx& fx = m_skillFx[i];
-            if (!m_bSkillFxPlaying || !fx.node) { fx.frame = nullptr; continue; }
-            ++running;
+            fx.frame = nullptr;
+            if (!m_bSkillFxPlaying || fx.done) continue;
+            if (static_cast<int>(now - fx.start) < 0) continue;     // a hit still waiting
             try {
-                wchar_t idx[12];
-                _snwprintf_s(idx, _countof(idx), _TRUNCATE, L"%d", fx.index);
-                Ztl_variant_t v = fx.node->item[idx];
-                IUnknownPtr pUnk = get_unknown(v);
-                IWzCanvasPtr pFrame;
-                if (pUnk) pUnk.QueryInterface(__uuidof(IWzCanvas), &pFrame);
-                // Out of frames. The cursor is NOT wound back: leaving it past the end is
+                const DWORD age = now - fx.start;
+                IWzCanvasPtr pFrame = SkillFxFrame(fx, fx.index);
+                // A projectile LOOPS its frames for as long as it flies; everything else plays
+                // once. The cursor is NOT wound back for the rest: leaving it past the end is
                 // what makes this permanent until the next keypress, and winding it back is
-                // what used to leave the effect on screen forever. A node whose frame 0 is
-                // not a canvas at all lands here too and simply never draws.
-                if (!pFrame) { fx.frame = nullptr; continue; }
+                // what used to leave the effect on screen forever.
+                if (!pFrame && fx.place == kPlaceBall && fx.index > 0 && age < kFxBallFlightMs) {
+                    fx.index = 0;
+                    pFrame = SkillFxFrame(fx, 0);
+                }
+                if (!pFrame || (fx.place == kPlaceBall && age >= kFxBallFlightMs)) {
+                    fx.done = true;
+                    continue;
+                }
 
                 int delay = 100;              // the client's default when a frame has none
                 try { delay = get_int32(pFrame->property->item[L"delay"], 100); } catch (...) {}
@@ -2073,31 +2283,67 @@ void CUIColorPrism::RefreshEffect() {
                     fx.at = now;
                     ++fx.index;
                 }
-                fx.ox = fx.oy = 0;
+                int ox = 0, oy = 0;
                 try {
                     IWzVector2DPtr pOrigin = pFrame->property->item[L"origin"].GetUnknown();
-                    if (pOrigin) { fx.ox = pOrigin->x; fx.oy = pOrigin->y; }
+                    if (pOrigin) { ox = pOrigin->x; oy = pOrigin->y; }
                 } catch (...) {}
-                const WeaponTint partTint = splits ? TintForSkillPart(fx.name)
-                    : WeaponTint_GetEffectiveFor(SkillTintKeyFor(m_target.skillId));
-                // MIRRORED when the avatar faces left. Placing the sprite on the other side
-                // was not enough on its own: anything with a direction to it, a slash or a
-                // thrown bolt, still pointed right while the character faced left.
-                fx.frame = WeaponTint_TintedCanvasFor(pFrame, partTint, EffectNeedsMirror());
+
+                // MIRRORED when the character faces right (see EffectNeedsMirror): anything
+                // with a direction to it, a slash or a thrown bolt, otherwise points the wrong
+                // way. The avatar parts follow the live facing; the projectile and the hit keep
+                // the facing of the cast. Screen and tile art has no direction.
+                bool mirror = false;
+                int ax = 0, ay = 0;
+                switch (fx.place) {
+                    case kPlaceBall:
+                        mirror = !m_castLeft;
+                        ax = static_cast<int>(m_castX + dir * kFxBallPxPerMs * static_cast<float>(age));
+                        ay = static_cast<int>(m_castY) - kFxChestRise;
+                        break;
+                    case kPlaceTarget:
+                        mirror = !m_castLeft;
+                        ax = static_cast<int>(m_castX) + dir * kFxTargetReach;
+                        ay = static_cast<int>(m_castY) - kFxChestRise;
+                        break;
+                    case kPlaceCentre:
+                        ax = (kLayout.previewL + kLayout.previewR) / 2 + fx.spread;
+                        ay = (kLayout.previewT + kLayout.previewB) / 2;
+                        break;
+                    default:
+                        mirror = EffectNeedsMirror();
+                        ax = static_cast<int>(m_avX);
+                        ay = static_cast<int>(m_avY);
+                        break;
+                }
+                fx.frame = WeaponTint_TintedCanvasFor(pFrame, TintForPart(fx.part), mirror);
+                if (!fx.frame) continue;
+                int w = 0;
+                try { w = static_cast<int>(fx.frame->width); } catch (...) {}
+                // The origin is the anchor point, so subtracting it puts the sprite on the
+                // anchor. A mirrored frame carries that anchor on the far edge, so it is
+                // measured from there instead.
+                fx.dx = mirror ? ax - (w - ox) : ax - ox;
+                fx.dy = ay - oy;
             } catch (...) {
                 fx.frame = nullptr;
             }
         }
-        // ONE PASS AND DONE. When every node has run out there is nothing left to draw, and
+        // ONE PASS AND DONE. When every layer has run out there is nothing left to draw, and
         // saying so here is what finally clears the margin: the effect stops being painted
-        // rather than being painted over.
-        bool anyFrame = false;
-        for (int i = 0; i < m_nSkillFxCount; ++i) {
-            if (m_skillFx[i].frame) { anyFrame = true; break; }
+        // rather than being painted over. A hit still waiting for its start is not done.
+        if (m_bSkillFxPlaying) {
+            bool live = false;
+            for (int i = 0; i < m_nSkillFxCount; ++i) {
+                if (!m_skillFx[i].done) { live = true; break; }
+            }
+            if (!live) m_bSkillFxPlaying = false;
         }
-        if (m_bSkillFxPlaying && running > 0 && !anyFrame) m_bSkillFxPlaying = false;
         return;
     }
+    // Not the Skills tab: an attack pressed here must not fire the moment Skills is opened.
+    m_bFxTrigger = false;
+    m_bSkillFxPlaying = false;
 
     const int want = (m_target.itemId && IsCashEffectItemId(m_target.itemId))
                    ? m_target.itemId : 0;
@@ -2197,11 +2443,11 @@ void CUIColorPrism::SendConfirm() {
     } else if (m_tab == kTabSkill) {
         // By skill ID. The item actions carry an inventory address the server re-reads, and a
         // skill has none, so sending one of those with itemId zero is what made a skill tint
-        // last only as long as the session. Layer picks the main `effect` vs extra
-        // `effect0` / `ball` nodes, and is body whenever this skill has no second chip.
-        const int layer = DyeingGlow() ? kTintLayer_Effects : kTintLayer_Body;
-        if (undo) WeaponTint_SendRestoreSkill(m_target.skillId, s_prismPos, layer);
-        else      WeaponTint_SendApplySkill(m_target.skillId, m_tint, s_prismPos, layer);
+        // last only as long as the session. The trailing byte is the PART the selected pill
+        // names -- one part per prism, exactly as one item layer is. Uncommitted edits on the
+        // other pills are dropped with the window, the same as the item chips' are.
+        if (undo) WeaponTint_SendRestoreSkill(m_target.skillId, s_prismPos, m_part);
+        else      WeaponTint_SendApplySkill(m_target.skillId, m_tint, s_prismPos, m_part);
     } else {
         const int layer = DyeingGlow() ? kTintLayer_Effects : kTintLayer_Body;
         if (undo) WeaponTint_SendRestore(m_target, s_prismPos, layer);
@@ -2369,8 +2615,12 @@ void CUIColorPrism::Draw(const RECT* pRect) {
     //     cash-weapon whitelist: a real crash stack proves it, and the
     //     failure is never cached so it repeats every frame. Unguarded it would unwind
     //     out of Draw and abandon every later step, blanking the sliders and buttons too.
-    if (m_target.IsSet() && NeedsDrop()) {
-        if (m_target.skillId > 0) {
+    // PER TAB: the two drop tabs share one target, and the skill icon on the Items tab (or an
+    // item's on Skills) would read as "this is what OK will dye" when it is not.
+    const bool wellHolds = (m_tab == kTabSkill) ? m_target.skillId > 0
+                         : (m_tab == kTabItem)  ? m_target.itemId > 0 : false;
+    if (wellHolds) {
+        if (m_tab == kTabSkill) {
             // A SKILL has no item icon, so the item path draws nothing at all -- which is
             // why the well looked empty while the target was in fact set. Every one of the
             // 616 player skills carries an icon node, so blit that instead.
@@ -2405,10 +2655,6 @@ void CUIColorPrism::Draw(const RECT* pRect) {
         }
     }
 
-    // COMPOSITED over the pane, not copied onto it: CA_REMOVEALPHA is the alpha-blended
-    // blit despite the name reading backwards. CA_OVERWRITE here replaced the pane with the
-    // effect's own translucency, which is most of why the preview and the cast looked like
-    // two different colours.
     // (4) The LAYER CHIPS, badged on the well. On Item and Skills, and only once something is
     //     on the well: before that there is no target whose layers they would describe.
     if (ShowingChips()) {
@@ -2428,7 +2674,14 @@ void CUIColorPrism::Draw(const RECT* pRect) {
         }
     }
 
-    DrawSkillFx(pCanvas, 0, 0, 0, 0, kLayout.wndW, kLayout.wndH, CANVAS_ALPHATYPE::CA_REMOVEALPHA);
+    // CA_OVERWRITE, WHICH COMPOSITES. The backdrop above measured it: over a cleared chrome it
+    // reproduces the art's alpha exactly, and over existing pixels it blends (which is why the
+    // glass stacked towards opaque before the chrome was cleared first). CA_REMOVEALPHA is the
+    // one that flattens a sprite to opaque, which boxed every effect frame in black -- the
+    // opposite of what the note on this pass used to claim.
+    DrawSkillFx(pCanvas, 0, 0, 0, 0, kLayout.wndW, kLayout.wndH, CANVAS_ALPHATYPE::CA_OVERWRITE);
+    // The part pills sit on top of the effect: the control must stay readable over it.
+    DrawPartPills(pCanvas, pfTip, pfReadout);
 
     // (5) Instructions on the blue banner, in white. What they say AND where they sit
     //     depend on the tab, because the two halves of this window work differently.
@@ -2455,18 +2708,29 @@ void CUIColorPrism::Draw(const RECT* pRect) {
     // the chips cannot carry -- there is no room for a word beside a 14px badge -- and it reads
     // as a sentence rather than creaking as a control label.
     const char* itemStatus = nullptr;
+    // On Skills the whole block is replaced once a skill is on the well: which PART the
+    // sliders dye (the pills show all of them), or that the skill has nothing to dye at all,
+    // which is also why OK stays disabled for it.
+    const char* skillLines[3] = { nullptr, nullptr, nullptr };
+    char skillStatus[48];
     if (m_tab == kTabItem && m_target.itemId) {
         itemStatus = DyeingGlow() ? "Dyeing this item's effects."
                                   : "Dyeing the item itself.";
-    } else if (m_tab == kTabSkill && m_target.skillId && ShowingChips()) {
-        itemStatus = DyeingGlow()
-            ? (WeaponTint_SkillHasBall(m_target.skillId)
-                && WeaponTint_SkillHasExtraEffect(m_target.skillId)
-                    ? "Dyeing extra effects and the projectile."
-                    : WeaponTint_SkillHasBall(m_target.skillId)
-                        ? "Dyeing this skill's projectile."
-                        : "Dyeing extra skill effects.")
-            : "Dyeing this skill's effect.";
+    } else if (m_tab == kTabSkill && m_target.skillId) {
+        if (m_nParts == 0) {
+            skillLines[0] = "This skill has no effects";
+            skillLines[1] = "that can be dyed.";
+            skillLines[2] = "Drag a different skill here.";
+        } else {
+            char label[24];
+            PartLabelA(m_part, label, sizeof(label));
+            _snprintf_s(skillStatus, _countof(skillStatus), _TRUNCATE, "Dyeing: %s", label);
+            skillLines[0] = skillStatus;
+            skillLines[1] = (m_nParts > 1) ? "Pick a part in the preview."
+                                           : "Press attack to preview the cast.";
+            skillLines[2] = (m_nParts > 1) ? "Press attack to preview the cast."
+                                           : "One Coloring Prism is used per dye.";
+        }
     }
     static const char* kBannerLook[2] = {
         "Adjust the sliders, then press OK.",
@@ -2477,6 +2741,7 @@ void CUIColorPrism::Draw(const RECT* pRect) {
             const char* line = (m_tab >= 0 && m_tab < kTabCount) ? kBannerDrop[m_tab][i]
                                                                  : nullptr;
             if (i == 1 && itemStatus) line = itemStatus;
+            if (m_tab == kTabSkill && m_target.skillId) line = skillLines[i];
             if (line)
                 DrawTextCentred(pCanvas, pfBanner, kLayout.bannerTextX, kLayout.bannerTextW,
                                 kLayout.bannerTextT + i * kLayout.bannerLineH, line);
@@ -2562,27 +2827,16 @@ void CUIColorPrism::Draw(const RECT* pRect) {
     // the full item card, so there is no stock way to say a sentence. A 10px silhouette needs
     // this; the icons only have to be distinguishable, the words do the explaining.
     if (m_chipHover >= 0 && ShowingChips()) {
+        // Items only: a skill picks its part with the pills, whose labels say it outright.
         const bool glow = (m_chipHover == kChipGlow);
-        const bool skill = (m_tab == kTabSkill);
-        const char* l0 = glow ? "Dye the effects this"
-                              : (skill ? "Dye the skill's own" : "Dye the item's own");
-        const char* l1 = glow ? (skill ? "skill plays" : "item plays")
-                              : "colours";
+        const char* l0 = glow ? "Dye the effects this" : "Dye the item's own";
+        const char* l1 = glow ? "item plays" : "colours";
         if (glow && !HasGlowLayer()) {
-            l0 = skill ? "This skill has no" : "This item has no";
+            l0 = "This item has no";
             l1 = "effects to dye";
         } else if (!glow && !HasItemLayer()) {
             l0 = "This is an effect";
             l1 = "with no item";
-        } else if (skill && glow) {
-            const bool extra = WeaponTint_SkillHasExtraEffect(m_target.skillId);
-            const bool ball  = WeaponTint_SkillHasBall(m_target.skillId);
-            if (extra && ball) { l0 = "Dye extra effects and"; l1 = "the projectile"; }
-            else if (ball)     { l0 = "Dye the projectile";    l1 = "this skill plays"; }
-            else               { l0 = "Dye extra effects";     l1 = "this skill plays"; }
-        } else if (skill && !glow) {
-            l0 = "Dye this skill's";
-            l1 = "main effect";
         }
 
         // At the TOP of the pane, clear of the avatar, rather than floating just above the chip
@@ -2641,9 +2895,9 @@ void CUIColorPrism::Draw(const RECT* pRect) {
     if (!m_bMarginPaint) return;                     // cannot erase it, so do not paint it
     const int mL = m_marginX, mT = m_marginY;
     const int mR = m_marginX + kLayout.wndW, mB = m_marginY + kLayout.wndH;
-    // VERBATIM out here, unlike the pane pass above. The margin is transparent with the game
-    // world behind it, and CA_REMOVEALPHA flattens a sprite cutout to opaque, which would wrap
-    // the effect in a black box.
+    // CA_OVERWRITE here as in the pane pass: composited onto the margin the clear above has
+    // just emptied, which leaves exactly the sprite's own alpha over the game world.
+    // CA_REMOVEALPHA flattens a sprite cutout to opaque and would wrap it in a black box.
     const CANVAS_ALPHATYPE keep = CANVAS_ALPHATYPE::CA_OVERWRITE;
     DrawSkillFx(pReal, mL, mT, 0,  0,  mL,        CanvasH(), keep);   // left
     DrawSkillFx(pReal, mL, mT, mR, 0,  CanvasW(), CanvasH(), keep);   // right
@@ -2664,6 +2918,17 @@ void CUIColorPrism::OnMouseButton(unsigned int msg, unsigned int /*wParam*/, int
         for (int t = 0; t < kTabCount; ++t) {
             RECT rc = { kLayout.tabX[t], kLayout.tabT, kLayout.tabX[t] + kLayout.tabW, kLayout.tabT + kLayout.tabH };
             if (PtInRect(&rc, pt)) { SetTab(t); return; }
+        }
+        // The part pills (Skills tab). A click between two pills falls through to the pane.
+        if (ShowingPills()) {
+            RECT rc[kSkillPartCount];
+            const int n = PillRects(rc, kSkillPartCount);
+            for (int i = 0; i < n; ++i) {
+                if (!PtInRect(&rc[i], pt)) continue;
+                SelectPart(m_parts[i]);
+                InvalidateRect(nullptr);
+                return;
+            }
         }
         // The layer chips. A disabled one is CONSUMED, not ignored: the click landed on a
         // control, and letting it fall through to the well underneath would read as the chip
@@ -2773,6 +3038,18 @@ int CUIColorPrism::OnMouseMove(int rx, int ry) {
     }
     if (chipHover != m_chipHover) {
         m_chipHover = chipHover;
+        InvalidateRect(nullptr);
+    }
+    int pillHover = -1;
+    if (ShowingPills()) {
+        RECT rc[kSkillPartCount];
+        const int n = PillRects(rc, kSkillPartCount);
+        for (int i = 0; i < n; ++i) {
+            if (PtInRect(&rc[i], pt)) { pillHover = i; break; }
+        }
+    }
+    if (pillHover != m_pillHover) {
+        m_pillHover = pillHover;
         InvalidateRect(nullptr);
     }
     int thumbHover = -1;

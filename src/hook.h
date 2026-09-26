@@ -69,8 +69,10 @@ void AttachCashShopWndMod();
 void AttachSkillUiMod();
 void AttachLongKeyboardMod();
 void AttachQuickslotDlgMod();
+void AttachCrashLog();
 
 inline void AttachClientHooks() {
+    AttachCrashLog();
     AttachClientBypass();
     AttachClientInlink();
     AttachStringPoolMod();

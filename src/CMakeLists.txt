@@ -28,6 +28,7 @@ add_library(injector SHARED
     skillui.cpp
     longkeyboard.cpp
     quickslotdlg.cpp
+    crashlog.cpp
     stringpool.cpp
     debug.cpp
     hook.cpp

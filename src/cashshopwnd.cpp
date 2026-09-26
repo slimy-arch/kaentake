@@ -815,8 +815,15 @@ constexpr int kCartH     = kCartRows * kCartBox + (kCartRows - 1) * kCartGap + 4
 // The NX and MP readouts. Their captions and their recessed value fields are painted into the
 // plate; these are the fields' right edges and the row the numbers sit on, all measured off it.
 constexpr int kCashValueY = 445;
-constexpr int kCashNxRight = 637;
-constexpr int kCashMpRight = 733;
+// WndBg's origin is (0,0), so these are plate pixels: the NX well's grey runs x=588..656 and
+// the MP well's x=683..751, each with a 1px light rim to the right. Numbers end kCashPadR inside
+// the grey so they sit against the right like every stock readout without touching the rim.
+constexpr int kCashPadR = 3;
+constexpr int kCashNxRight = 656 - kCashPadR;
+constexpr int kCashMpRight = 751 - kCashPadR;
+// Usable width of each well from the same padding on the left (588+3 .. 653).
+// NX from a billion up (the uncap goes to 9,999,999,999,999) is denominated by FormatCashFit.
+constexpr int kCashFieldW = kCashNxRight - (588 + kCashPadR);
 
 // THE BUTTONS ARE THE NPC SHOP'S OWN BUY BUTTON, 3-sliced.
 //
@@ -1078,10 +1085,11 @@ std::map<int, std::vector<Entry>> g_buckets;   // bucket key -> its rows
 std::map<int, int> g_counts;                   // bucket key -> how many the server says it has
 std::set<int> g_loaded;                        // buckets whose rows have arrived
 std::set<int> g_pending;                       // buckets requested, reply outstanding
-int g_cash[3] = { 0, 0, 0 };            // nxCredit, maplePoint, nxPrepaid
+long long g_cash[3] = { 0, 0, 0 };      // nxCredit (long since the NX uncap), maplePoint, nxPrepaid
 
 std::atomic<bool> g_bWantOpen{ false };
 std::atomic<bool> g_bCatalogDirty{ false };
+std::atomic<bool> g_bCashDirty{ false };      // only the NX/MP readout changed: repaint, keep tooltip/avatar
 // Raised by the receive thread when a cart purchase succeeded; the window empties the
 // cart on the MAIN thread, because the cart is window state and nothing else may touch it.
 std::atomic<bool> g_bCartBought{ false };
@@ -1159,6 +1167,10 @@ struct Reader {
     int Decode4() {
         if (!Can(4)) { bad = true; return 0; }
         int v = *reinterpret_cast<int*>(data() + offset()); offset() += 4; return v;
+    }
+    long long Decode8() {
+        if (!Can(8)) { bad = true; return 0; }
+        long long v = *reinterpret_cast<long long*>(data() + offset()); offset() += 8; return v;
     }
     // u16 length + raw bytes, matching ByteBufOutPacket.writeString
     // (a sibling window is the canonical reader).
@@ -2067,6 +2079,32 @@ public:
     void StrRight(IWzCanvasPtr c, int fi, int right, int y, const char* s) {
         Str(c, fi, right - TextW(fi, s), y, s);
     }
+    // Billions and up are denominated: up to two decimals of the unit, truncated (never rounded
+    // up, so it never reads as more than the balance) with trailing zeros dropped --
+    // 5,120,000,000 -> "5.12b", 5,000,000,000 -> "5b", 9,999,999,999,999 -> "9.99t".
+    // Below a billion the whole number is shown, falling back to m/k only if it cannot fit maxW.
+    void FormatCashFit(char* out, size_t n, long long value, int maxW) {
+        static const struct { long long div; char unit; } kUnits[] = {
+            { 1000000000000LL, 't' }, { 1000000000LL, 'b' }, { 1000000LL, 'm' }, { 1000LL, 'k' } };
+        _snprintf(out, n, "%lld", value); out[n - 1] = 0;
+        const bool bFits = value < 1000000000LL && TextW(kF_Text, out) <= maxW;
+        if (bFits) return;
+        for (const auto& u : kUnits) {
+            if (value >= u.div) {
+                const long long whole = value / u.div;
+                const long long frac = (value % u.div) / (u.div / 100);
+                if (frac == 0) {
+                    _snprintf(out, n, "%lld%c", whole, u.unit);
+                } else if (frac % 10 == 0) {
+                    _snprintf(out, n, "%lld.%lld%c", whole, frac / 10, u.unit);
+                } else {
+                    _snprintf(out, n, "%lld.%02lld%c", whole, frac, u.unit);
+                }
+                out[n - 1] = 0;
+                return;
+            }
+        }
+    }
     void StrCenter(IWzCanvasPtr c, int fi, int cx, int y, const char* s) {
         Str(c, fi, cx - TextW(fi, s) / 2, y, s);
     }
@@ -2652,6 +2690,10 @@ void CUICashShop::Update() {
         InvalidateRect(nullptr);
     }
 
+    if (g_bCashDirty.exchange(false)) {
+        InvalidateRect(nullptr);
+    }
+
     // The index arrives AFTER the constructor has run, so the opening category cannot be
     // requested there. Idempotent -- g_loaded/g_pending make it two set lookups once the
     // category is in flight -- and it is also what fetches a category whose request was
@@ -3113,15 +3155,15 @@ void CUICashShop::DrawPreview(IWzCanvasPtr c, const std::vector<Entry>& vis) {
     // CASH. The two captions and their recessed value fields are painted into the plate, so
     // only the numbers are drawn -- right-aligned into those fields, the way every stock
     // readout aligns a number.
-    int cash[3];
+    long long cash[3];
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         cash[0] = g_cash[0]; cash[1] = g_cash[1]; cash[2] = g_cash[2];
     }
     char v[40];
-    _snprintf(v, sizeof(v), "%d", cash[0]); v[sizeof(v) - 1] = 0;
+    FormatCashFit(v, sizeof(v), cash[0], kCashFieldW);
     StrRight(c, kF_Text, kCashNxRight, kCashValueY, v);
-    _snprintf(v, sizeof(v), "%d", cash[1]); v[sizeof(v) - 1] = 0;
+    _snprintf(v, sizeof(v), "%d", static_cast<int>(cash[1])); v[sizeof(v) - 1] = 0;
     StrRight(c, kF_Text, kCashMpRight, kCashValueY, v);
 }
 
@@ -3505,7 +3547,8 @@ void CashShopWnd_HandleSync(CInPacket* pPacket) {
 
     switch (resp) {
         case kResp_Open: {
-            const int a = r.Decode4(), b = r.Decode4(), c = r.Decode4();
+            const long long a = r.Decode8();   // NX Credit: writeLong since the NX uncap
+            const int b = r.Decode4(), c = r.Decode4();
             if (r.bad) return;
             {
                 std::lock_guard<std::mutex> lk(g_mtx);
@@ -3515,7 +3558,8 @@ void CashShopWnd_HandleSync(CInPacket* pPacket) {
             break;
         }
         case kResp_Cash: {
-            const int a = r.Decode4(), b = r.Decode4(), c = r.Decode4();
+            const long long a = r.Decode8();   // NX Credit: writeLong since the NX uncap
+            const int b = r.Decode4(), c = r.Decode4();
             if (r.bad) return;
             std::lock_guard<std::mutex> lk(g_mtx);
             g_cash[0] = a; g_cash[1] = b; g_cash[2] = c;
@@ -3653,6 +3697,17 @@ static int __fastcall CWvsContext__TryCloseUI_hook(void* pThis, void* _EDX, void
 
 void AttachCashShopWndMod() {
     ATTACH_HOOK(CWvsContext__TryCloseUI, CWvsContext__TryCloseUI_hook);
+}
+
+// Live NX from SendOpcode.INVENTORY_CASH (inventorynx.cpp), which the server sends after every NX
+// Credit change -- so a gain while the window is open shows at once rather than on the next open.
+void CashShopWnd_SetNxCredit(long long nNxCredit) {
+    using namespace CashShopWnd;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_cash[0] = nNxCredit;
+    }
+    g_bCashDirty.store(true);
 }
 
 void CashShopWnd_Tick() {

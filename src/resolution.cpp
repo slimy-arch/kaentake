@@ -2,6 +2,7 @@
 #include "hook.h"
 #include "constants.h"
 #include "uiDamageRank.h"
+#include "damageskin.h"
 #include "wvs/config.h"
 #include "wvs/wnd.h"
 #include "wvs/wndman.h"
@@ -114,6 +115,7 @@ static auto set_stage = reinterpret_cast<void(__cdecl*)(CStage*, void*)>(0x00777
 void __cdecl set_stage_hook(CStage* pStage, void* pParam) {
     // CField::ms_RTTI_CField - change resolution before set_stage
     if (pStage && pStage->IsKindOf(reinterpret_cast<const CRTTI*>(0x00BED758))) {
+        ClearDamageSkinBroadcasts();
         set_screen_resolution(g_nResolution, 0);
         set_stage(pStage, pParam);
         return;
@@ -123,6 +125,11 @@ void __cdecl set_stage_hook(CStage* pStage, void* pParam) {
     if (bLeavingField) {
         CUIDamageRank::GetInstance().SetVisible(false);
         CDamageRankData::GetInstance().Reset();
+    }
+    // CLogin::ms_RTTI_CLogin 0x00BEDA30 (returned by 0x005F3E37, in the CLogin vtable three slots before
+    // CLogin::Init 0x005F42CD)
+    if (pStage && pStage->IsKindOf(reinterpret_cast<const CRTTI*>(0x00BEDA30))) {
+        ClearLevelShadowCache();
     }
     set_stage(pStage, pParam);
     // change resolution after set_stage

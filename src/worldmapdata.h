@@ -12,6 +12,9 @@ IWzCanvasPtr GetMobIcon(int nMobID);
 IWzCanvasPtr GetNpcIcon(int nNpcID);
 IWzCanvasPtr GetMapMarkIcon(int nMapID);
 
+// Drops the cached mob/NPC/map-mark canvases. Called when the world map closes.
+void ClearWorldMapIconCache();
+
 // 1 = available, 2 = completable, 3 = in progress (UI/UIWindow.img/QuestIcon)
 IWzCanvasPtr GetQuestMarkerIcon(int nState);
 

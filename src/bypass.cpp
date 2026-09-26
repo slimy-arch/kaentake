@@ -255,6 +255,16 @@ void CWvsApp::CallUpdate_hook(int tCurTime) {
         }
     }
     get_gr()->UpdateCurrentTime(tCurTime);
+    // ResMan's object cache has no time expiry; stock flushes it only on field entry (CField::Init
+    // 0x00529326, FlushCachedObjects(180000)), so a long stay in one map (FM) grows it without limit.
+    // Same call and threshold as stock, once a minute.
+    static int s_tLastResManFlush = tCurTime;
+    if (tCurTime - s_tLastResManFlush >= 60000) {
+        s_tLastResManFlush = tCurTime;
+        if (get_rm()) {
+            get_rm()->raw_FlushCachedObjects(180000);
+        }
+    }
     if (CActionMan::IsInstantiated()) {
         // CActionMan::GetInstance()->SweepCache();
         reinterpret_cast<void(__thiscall*)(CActionMan*)>(0x00411BBB)(CActionMan::GetInstance());

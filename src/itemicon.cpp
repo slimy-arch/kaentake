@@ -43,8 +43,9 @@ void __fastcall CItemInfo__DrawItemIconForSlot_helper(CItemInfo* pThis, void* _E
     }
     pThis->DrawItemIconForSlot(pCanvas, nItemID, x, y, bProtectedItem, bMag2, bPetDead, bHideCashIcon, nEquipItemQuality, bHideCashIcon);
     if (nPetIndex == 0) {
-        IWzCanvasPtr pBossPetIcon = get_unknown(get_rm()->GetObjectA(L"UI/UIWindow.img/Item/bossPetIcon"));
-        pCanvas->CopyEx(x - 1, y - 37, pBossPetIcon, CANVAS_ALPHATYPE::CA_REMOVEALPHA, 0, 0, 0, 0, 0, 0);
+        // Resolved once: this runs on every inventory redraw.
+        static IWzCanvasPtr s_pBossPetIcon = get_unknown(get_rm()->GetObjectA(L"UI/UIWindow.img/Item/bossPetIcon"));
+        pCanvas->CopyEx(x - 1, y - 37, s_pBossPetIcon, CANVAS_ALPHATYPE::CA_REMOVEALPHA, 0, 0, 0, 0, 0, 0);
     }
 }
 

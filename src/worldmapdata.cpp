@@ -181,6 +181,12 @@ IWzCanvasPtr GetMapMarkIcon(int nMapID) {
     return pCanvas;
 }
 
+void ClearWorldMapIconCache() {
+    g_mMobIcon.clear();
+    g_mNpcIcon.clear();
+    g_mMapIcon.clear();
+}
+
 IWzCanvasPtr GetQuestMarkerIcon(int nState) {
     if (nState < 1 || nState > 3) {
         return nullptr;

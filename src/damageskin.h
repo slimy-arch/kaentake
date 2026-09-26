@@ -37,6 +37,10 @@ extern std::vector<int> g_vSkinIds;
 // The local character's applied skin (0 = stock digits), as confirmed by the server.
 extern int g_nActiveSkin;
 
+// Forgets other characters' skins. Called on field entry: the server re-sends every resident's
+// skin after the warp (MapleMap.addPlayer), so the map only ever needs the current field's players.
+void ClearDamageSkinBroadcasts();
+
 // Idempotent. Loads the skin tree from Custom.wz on the first call.
 void LoadDamageSkin();
 

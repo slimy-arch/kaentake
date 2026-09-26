@@ -25,6 +25,7 @@
 #include "hook.h"
 #include "debug.h"
 #include "storagebag.h"
+#include "coloringprism.h"
 #include "clientsocket.h"
 #include "wvs/packet.h"
 #include "wvs/field.h"
@@ -196,6 +197,13 @@ static IWzGr2DLayer* s_pDragIcon = nullptr;
 // this flag lets us suppress scroll changes so picking an item up can't scroll
 // the grid. Cleared on drop (OnDropped hook), on button-up, and by EndDragIcon.
 static bool s_bItemDragging = false;
+// Identity of the last draggable a bag drag created, and the source handler written into its
+// +0x24. Used only to keep bag drags away from the Coloring Prism's drop handler, which reads
+// +0x18/+0x1C as (inventory type, position) -- a bag drag writes (2, bagSlot) there. Kept apart
+// from s_bItemDragging because PollDragRelease clears that flag BEFORE the drop fires, and
+// independent of the window pointer so it still holds after the bag window has closed.
+static void* s_pBagDraggable = nullptr;
+static void* s_pBagDragSrc = nullptr;
 static void EndDragIcon() {
     s_bItemDragging = false;
     if (!s_pDragIcon) return;
@@ -753,11 +761,15 @@ public:
             *reinterpret_cast<int*>((char*)d + 0x1C) = slot;    // source bag slot index
             *reinterpret_cast<int*>((char*)d + 0x20) = 0;
             *reinterpret_cast<void**>((char*)d + 0x24) = (char*)this + 4;   // source handler
+            s_pBagDraggable = d;                                 // tag it as a bag drag (see IsBagDrag)
+            s_pBagDragSrc = (char*)this + 4;
             s_bItemDragging = true;                              // suppress scroll until the drop fires
             BeginDragDrop(wm, (char*)this + 4, d);
             HideTip();
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             s_bItemDragging = false;
+            s_pBagDraggable = nullptr;
+            s_pBagDragSrc = nullptr;
             if (s_pDragIcon == pIcon) s_pDragIcon = nullptr;
         }
     }
@@ -1388,7 +1400,42 @@ static void __fastcall CField_OnKey_hook(CField* pThis, void* /*edx*/, unsigned 
 // The return value is unused by CWndMan::EndDragDrop's callers for a consumed drop; 1 = handled.
 typedef int(__thiscall* t_CDraggableItem_OnDropped)(void*, void*, void*, int, int);
 static auto CDraggableItem_OnDropped = reinterpret_cast<t_CDraggableItem_OnDropped>(0x004EF140);
+// The drag source tagged on a CDraggableItem: +0x24 handler, +0x18 / +0x1C (type, slot). SEH leaf,
+// the same reads HandleDropped makes. False if pThis could not be read.
+static bool SehReadDragSource(void* pThis, void*& srcHandler, int& srcA, int& srcB) {
+    srcHandler = nullptr; srcA = 0; srcB = 0;
+    if (!pThis) return false;
+    __try {
+        srcHandler = *reinterpret_cast<void**>(reinterpret_cast<char*>(pThis) + 0x24);
+        srcA = *reinterpret_cast<int*>(reinterpret_cast<char*>(pThis) + 0x18);
+        srcB = *reinterpret_cast<int*>(reinterpret_cast<char*>(pThis) + 0x1C);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+// Did this drag start in the bag? Either the draggable is the one BeginItemDrag created (holds even
+// after the bag window closed mid-drag), or its source handler is the live bag window's.
+static bool IsBagDrag(void* pThis, void* srcHandler) {
+    if (pThis && pThis == s_pBagDraggable && srcHandler == s_pBagDragSrc) return true;
+    CUIBagWindow* w = CUIBagWindow::ms_pInstance;
+    return w && srcHandler == reinterpret_cast<char*>(w) + 4;
+}
+
 static int __fastcall CDraggableItem_OnDropped_hook(void* pThis, void* /*edx*/, void* pFrom, void* pTo, int rx, int ry) {
+    // Coloring Prism drop well (coloringprism.cpp). This hook owns 0x004EF140, so the prism is
+    // dispatched from here instead of Detouring it again. It goes BEFORE HandleDropped, which
+    // returns early while the bag is closed, and it never sees a bag drag: those carry
+    // (2, bagSlot) at +0x18/+0x1C, which the prism would misread as a Use-tab position.
+    // A pTo of null is passed through on purpose (the prism falls back to a cursor test).
+    void* srcHandler = nullptr;
+    int invType = 0, invPos = 0;
+    const bool bRead = SehReadDragSource(pThis, srcHandler, invType, invPos);
+    const bool bBagDrag = bRead && IsBagDrag(pThis, srcHandler);
+    if (bRead && !bBagDrag && ColorPrism_HandleItemDrop(pTo, invType, invPos)) return 1;
+    if (pThis && pThis == s_pBagDraggable) { s_pBagDraggable = nullptr; s_pBagDragSrc = nullptr; }
+
     if (HandleDropped(pThis, pFrom, pTo, rx, ry)) return 1;
     return CDraggableItem_OnDropped(pThis, pFrom, pTo, rx, ry);
 }

@@ -2,6 +2,7 @@
 #include "hook.h"
 #include "uiDamageRank.h"
 #include "cashshopwnd.h"
+#include "weapontint.h"
 #include "constants.h"
 #include "wvs/wvsapp.h"
 #include "wvs/wndman.h"
@@ -238,6 +239,8 @@ void CWvsApp::SetUp_hook() {
 void CWvsApp::CallUpdate_hook(int tCurTime) {
     // Opens/closes the cash shop window on the main thread; the receive path only raises a flag.
     CashShopWnd_Tick();
+    // Coloring Prism: repaints a tint the server pushed on the receive thread (main-thread only work).
+    WeaponTint_Tick();
     // Monster Book: no-ops with the book closed. Queries are sent and views rebuilt here, so nothing
     // engine-side runs on the packet or draw paths.
     try {

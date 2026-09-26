@@ -59,6 +59,8 @@ void AttachStringPoolMod();
 void AttachResManMod();
 void AttachAvatarDataMod();
 void AttachItemEffectMod();
+void AttachWeaponTintMod();      // weapontint.cpp: Coloring Prism recolour (5 Detours, see its header)
+void AttachColoringPrismMod();   // coloringprism.cpp: Coloring Prism window (2 Detours; rest dispatched)
 void AttachResolutionMod();
 void AttachMobHpTagMod();
 void AttachToolTipMod();
@@ -113,6 +115,8 @@ inline void AttachClientHooks() {
     AttachResManMod();
     AttachAvatarDataMod();
     AttachItemEffectMod();
+    AttachWeaponTintMod();
+    AttachColoringPrismMod();
     AttachResolutionMod();
     AttachMobHpTagMod();
     AttachToolTipMod();

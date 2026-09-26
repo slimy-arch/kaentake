@@ -12,7 +12,7 @@
 #include <unordered_map>
 
 // Damage skins: player -> mob damage numbers drawn with a per-character sprite set from Custom.wz, plus
-// "unit damage" (1.8K / 2M / 3B) for skins whose NoCustom/customType is "glUnit".
+// "unit damage" (1.8K / 2M / 3B / 4T) for skins whose NoCustom/customType is "glUnit".
 //
 // CAnimationDisplayer::Effect_HP picks its digit sheets in a switch on lColorType. Player -> mob damage is
 // colour type 0 (normal or crit); mob -> player is 2 and heals are 1, and those are left alone. We splice
@@ -22,8 +22,8 @@
 //
 // Unit damage: Effect_HP formats the number with ZXString::Format("%d") and then looks each character up
 // as `_itow(c - '0')` in the digit sheet. For a unit skin we rewrite the formatted string with bytes
-// ':' ';' '<' '=' (keys "10".."13") and hand Effect_HP a property wrapper that maps those keys onto
-// NoCustom/<sheet>/0..3.
+// ':' ';' '<' '=' '>' (keys "10".."14") and hand Effect_HP a property wrapper that maps those keys onto
+// NoCustom/<sheet>/0..4 (. K M B T). Every glUnit skin in Custom.wz carries all five.
 
 
 // ---------------------------------------------------------------------------------------------------------
@@ -278,7 +278,7 @@ void __declspec(naked) EffectMiss_hook() {
 // ---------------------------------------------------------------------------------------------------------
 
 // IWzProperty over a unit skin's digit sheet. Keys "0".."9" resolve to damageSkin/<id>/<sheet>/<n>,
-// "10".."13" to damageSkin/<id>/NoCustom/<sheet>/<n-10>. Resolved through the resman on each call, so it
+// "10".."14" to damageSkin/<id>/NoCustom/<sheet>/<n-10>. Resolved through the resman on each call, so it
 // holds no references the cache could invalidate. Owned by g_mDamageSkinProp for the DLL's lifetime.
 class CUnitPropertyWrapper : public IWzProperty {
 public:
@@ -363,7 +363,7 @@ private:
 
         const wchar_t* sSheet = bCrit ? L"NoCri0" : L"NoRed0";
         wchar_t sUOL[192];
-        if (sPath[0] == L'1' && sPath[1] >= L'0' && sPath[1] <= L'3' && sPath[2] == 0) {
+        if (sPath[0] == L'1' && sPath[1] >= L'0' && sPath[1] <= L'4' && sPath[2] == 0) {
             _snwprintf_s(sUOL, _countof(sUOL), _TRUNCATE, L"%ls/%d/NoCustom/%ls/%c",
                     kDamageSkinUOL, nSkinId, sSheet, sPath[1]);
         } else {
@@ -396,25 +396,31 @@ static void BuildUnitWrappers() {
     }
 }
 
-// digits -> '0'..'9', '.' -> ':' (key "10"), K -> ';' ("11"), M -> '<' ("12"), B -> '=' ("13").
-// Keeps one decimal when it is not zero: 1834 -> "1.8K", 2000000 -> "2M".
-static void FormatUnitDamage(int nDamage, char* sOut, size_t uCap) {
-    long long n = nDamage < 0 ? -static_cast<long long>(nDamage) : nDamage;
+// digits -> '0'..'9', '.' -> ':' (key "10"), K -> ';' ("11"), M -> '<' ("12"), B -> '=' ("13"),
+// T -> '>' ("14"). Keeps one decimal when it is not zero: 1834 -> "1.8K", 2000000 -> "2M".
+// Takes 64 bits so a trillion-scale value formats as T; Effect_HP itself still hands us an int
+// (see EffectHP_Format_hook), so T is reached only once a wider damage value is passed in.
+static void FormatUnitDamage(long long nDamage, char* sOut, size_t uCap) {
+    // unsigned magnitude: -LLONG_MIN would overflow
+    unsigned long long n = nDamage < 0 ? 0ULL - static_cast<unsigned long long>(nDamage) : nDamage;
     char cUnit = ';';
-    long long nDiv = 1000;
-    if (n >= 1000000000LL) {
+    unsigned long long nDiv = 1000;
+    if (n >= 1000000000000ULL) {
+        cUnit = '>';
+        nDiv = 1000000000000ULL;
+    } else if (n >= 1000000000ULL) {
         cUnit = '=';
         nDiv = 1000000000LL;
-    } else if (n >= 1000000LL) {
+    } else if (n >= 1000000ULL) {
         cUnit = '<';
-        nDiv = 1000000LL;
+        nDiv = 1000000ULL;
     }
-    long long nWhole = n / nDiv;
-    long long nTenths = (n % nDiv) * 10 / nDiv;
+    unsigned long long nWhole = n / nDiv;
+    unsigned long long nTenths = (n % nDiv) / (nDiv / 10);
     if (nTenths == 0) {
-        _snprintf_s(sOut, uCap, _TRUNCATE, "%lld%c", nWhole, cUnit);
+        _snprintf_s(sOut, uCap, _TRUNCATE, "%llu%c", nWhole, cUnit);
     } else {
-        _snprintf_s(sOut, uCap, _TRUNCATE, "%lld:%lld%c", nWhole, nTenths, cUnit);
+        _snprintf_s(sOut, uCap, _TRUNCATE, "%llu:%llu%c", nWhole, nTenths, cUnit);
     }
 }
 
@@ -429,7 +435,7 @@ static ZXString<char>* __cdecl EffectHP_Format_hook(ZXString<char>* pResult, con
     ZXString_Format(pResult, sFormat, nDamage);
     if (bWrapper && nDamage >= 1000) {
         char sUnit[32];
-        FormatUnitDamage(nDamage, sUnit, sizeof(sUnit));
+        FormatUnitDamage(static_cast<long long>(nDamage), sUnit, sizeof(sUnit));
         *pResult = sUnit;
     }
     return pResult;

@@ -27,6 +27,11 @@ public:
     const unsigned char* Current() const {
         return &m_aRecvBuff[m_uOffset];
     }
+    // Alias of Current() for code ported from the Coloring Prism bundle (weapontint.cpp).
+    // UNCHECKED: call CanRead first.
+    const unsigned char* CurrentPublic() const {
+        return Current();
+    }
     unsigned short Peek2() const {
         return CanRead(2) ? *reinterpret_cast<const unsigned short*>(Current()) : 0;
     }

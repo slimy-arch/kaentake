@@ -56,6 +56,11 @@ extern std::vector<int> g_vOwnedSkins;
 void Send_DamageSkinApply(int nSkinId);
 void Send_DamageSkinPurchase(int nSkinId);
 
+// Scopes the damage-skin renderer to one attacker's skin (0 / unknown id = stock digits) for draws
+// outside CMob::OnHit, e.g. DoT ticks from DAMAGE_MONSTER. Returns the previous state for End.
+int DamageSkin_BeginAttacker(int nCharacterId);
+void DamageSkin_End(int nPrevious);
+
 // Rebuilds the picker's lists if it is open (damageskinpicker.cpp).
 void RefreshDamageSkinPicker();
 

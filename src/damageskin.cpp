@@ -2,6 +2,7 @@
 #include "hook.h"
 #include "debug.h"
 #include "damageskin.h"
+#include "damagelong.h"
 #include "clientsocket.h"
 #include "wvs/packet.h"
 #include "wvs/util.h"
@@ -398,8 +399,8 @@ static void BuildUnitWrappers() {
 
 // digits -> '0'..'9', '.' -> ':' (key "10"), K -> ';' ("11"), M -> '<' ("12"), B -> '=' ("13"),
 // T -> '>' ("14"). Keeps one decimal when it is not zero: 1834 -> "1.8K", 2000000 -> "2M".
-// Takes 64 bits so a trillion-scale value formats as T; Effect_HP itself still hands us an int
-// (see EffectHP_Format_hook), so T is reached only once a wider damage value is passed in.
+// T is the top unit, so Long.MAX_VALUE prints as "9223372T". Effect_HP hands us an int; a line
+// that did not fit arrives as a damagelong.h tag and EffectHP_Format_hook resolves it first.
 static void FormatUnitDamage(long long nDamage, char* sOut, size_t uCap) {
     // unsigned magnitude: -LLONG_MIN would overflow
     unsigned long long n = nDamage < 0 ? 0ULL - static_cast<unsigned long long>(nDamage) : nDamage;
@@ -433,10 +434,17 @@ static auto ZXString_Format = reinterpret_cast<ZXString<char>*(__cdecl*)(ZXStrin
 static ZXString<char>* __cdecl EffectHP_Format_hook(ZXString<char>* pResult, const char* sFormat, int nDamage) {
     LONG bWrapper = InterlockedExchange(&g_bUnitWrapperActive, 0);
     ZXString_Format(pResult, sFormat, nDamage);
-    if (bWrapper && nDamage >= 1000) {
+    bool bTag = DamageLong_IsTag(nDamage);
+    long long nReal = bTag ? DamageLong_Resolve(nDamage) : nDamage;
+    if (bWrapper && nReal >= 1000) {
         char sUnit[32];
-        FormatUnitDamage(static_cast<long long>(nDamage), sUnit, sizeof(sUnit));
+        FormatUnitDamage(nReal, sUnit, sizeof(sUnit));
         *pResult = sUnit;
+    } else if (bTag) {
+        // stock digit sheet: the real decimal instead of the tag's 2147xxxxxx
+        char sReal[32];
+        _snprintf_s(sReal, sizeof(sReal), _TRUNCATE, "%lld", nReal);
+        *pResult = sReal;
     }
     return pResult;
 }
@@ -465,17 +473,25 @@ static int GetLocalCharId() {
 // character id (the local id for local summons). Draws the damage through CMob::ShowDamage (0x00668E0D).
 static auto CMob__OnHit = reinterpret_cast<void(__thiscall*)(void*, unsigned int, int, int, int, int, int, int, int, int, int, int, int, int)>(0x00668B83);
 
-static void __fastcall CMob__OnHit_hook(void* pThis, void* _EDX, unsigned int dwAttackerId, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13) {
+int DamageSkin_BeginAttacker(int nAttacker) {
     int nSaved = g_nRenderSkin;
-    int nAttacker = static_cast<int>(dwAttackerId);
     if (nAttacker != 0 && nAttacker == GetLocalCharId()) {
         g_nRenderSkin = g_nActiveSkin;
     } else {
         auto it = g_mCharIdToSkin.find(nAttacker);
         g_nRenderSkin = it == g_mCharIdToSkin.end() ? 0 : it->second;
     }
+    return nSaved;
+}
+
+void DamageSkin_End(int nPrevious) {
+    g_nRenderSkin = nPrevious;
+}
+
+static void __fastcall CMob__OnHit_hook(void* pThis, void* _EDX, unsigned int dwAttackerId, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13) {
+    int nSaved = DamageSkin_BeginAttacker(static_cast<int>(dwAttackerId));
     CMob__OnHit(pThis, dwAttackerId, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13);
-    g_nRenderSkin = nSaved;
+    DamageSkin_End(nSaved);
 }
 
 

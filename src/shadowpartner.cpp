@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "hook.h"
 #include "wvs/secure.h"
+#include "damagelong.h"
 
 // Shadow Partner for every class: while the buff is active, melee and magic attacks get
 // min(n * 2, 15) lines, and each partner line (the second half) mirrors the matching first-half
@@ -37,8 +38,9 @@ void MirrorPartnerLines(int* anDamage, int* abCritical, int nDamagePerMob) {
     }
     int nHalf = nDamagePerMob / 2;
     for (int i = nHalf; i < nDamagePerMob; ++i) {
-        int nSource = anDamage[i - nHalf];
-        anDamage[i] = nSource <= 0 ? 0 : (std::max)(1, nSource / 2);
+        // resolve the tag first: halving the stored int of an overflowed line would give ~1.07b
+        long long nSource = DamageLong_Resolve(anDamage[i - nHalf]);
+        anDamage[i] = nSource <= 0 ? 0 : DamageLong_Store((std::max)(1LL, nSource / 2));
         abCritical[i] = abCritical[i - nHalf];
     }
 }

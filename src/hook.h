@@ -69,6 +69,10 @@ void AttachCashShopWndMod();
 void AttachSkillUiMod();
 void AttachLongKeyboardMod();
 void AttachQuickslotDlgMod();
+void AttachMagicDamageMod();
+void AttachCritRoutingMod();
+void AttachStatDetailLayoutMod();
+void AttachStatUiLayoutMod();
 void AttachCrashLog();
 
 // stage-change cleanup, called from set_stage_hook (resolution.cpp)
@@ -101,6 +105,10 @@ inline void AttachClientHooks() {
     AttachSkillUiMod();
     AttachLongKeyboardMod();
     AttachQuickslotDlgMod();
+    AttachMagicDamageMod();
+    AttachCritRoutingMod();
+    AttachStatDetailLayoutMod();
+    AttachStatUiLayoutMod();
 }
 
 

@@ -39,6 +39,15 @@
 
 #define TO_PVOID(VALUE) ((void*)(VALUE))
 
+// Breadcrumb / registry hooks used by the Monster Book modules (ported from kaentake-main). No-ops here.
+#define MUSH_FEATURE(NAME) ((void)0)
+#define REGISTER_CODECAVE(PTR, NAME) ((void)0)
+inline bool MushFeatureQuarantined(const char*) {
+    return false;
+}
+inline void MushRegisterCode(uintptr_t, const char*) {
+}
+
 
 // called in injector.cpp -> DllMain
 void AttachSystemHooks();
@@ -77,6 +86,22 @@ void AttachStorageBagMod();
 void AttachInventoryNxMod();
 void AttachCrashLog();
 
+// Monster Book (monsterbook*.cpp). String/MonsterBook.img must carry an entry for every card mob,
+// else CMonsterBookMan has no record and Basic Info prints "HP : (null)".
+void AttachMonsterBookMod();          // colour icons, 0-counters, art/HP/MP, all four tabs
+void AttachMonsterBookFoundInMod();   // Found In row click -> world map; Found In / Episode restyle
+void AttachMonsterBookDropsMod();     // drop chance % on the Dropping icons (S2C 0x3733 type 0)
+void AttachMonsterBookSearchMod();    // mob-name + item-name search fields (types 1/2)
+class CInPacket;
+void MonsterBookDrops_OnClientTick();
+void MonsterBookDrops_OnPacket(CInPacket* pPacket);
+void MonsterBookSearch_OnClientTick();
+void MonsterBookSearch_OnPacket(CInPacket* pPacket);
+// right-page arbitration, defined in monsterbook.cpp: the drop labels must not paint over the
+// search module's item-result view
+void MonsterBookSearch_SetItemResultView(bool bOn);
+bool MonsterBookSearch_IsItemResultView();
+
 // stage-change cleanup, called from set_stage_hook (resolution.cpp)
 void ClearLevelShadowCache();      // maxlevel.cpp
 
@@ -113,6 +138,10 @@ inline void AttachClientHooks() {
     AttachStatUiLayoutMod();
     AttachStorageBagMod();
     AttachInventoryNxMod();
+    AttachMonsterBookMod();
+    AttachMonsterBookFoundInMod();
+    AttachMonsterBookDropsMod();   // before SEARCH: installs the 16-per-page Dropping paging it reads
+    AttachMonsterBookSearchMod();
 }
 
 

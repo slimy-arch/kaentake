@@ -14,6 +14,7 @@ constexpr unsigned short LP_WORLD_MAP_PLAYERS = 0x178; // Server SendOpcode.WORL
 constexpr unsigned short LP_DAMAGE_RANK = 0x3714;      // Server SendOpcode.DPT_TRACKER
 constexpr unsigned short LP_STAT_DETAIL_RATES = 0x3740; // Server SendOpcode.STAT_DETAIL_RATES
 constexpr unsigned short LP_INVENTORY_CASH = 0x3741;     // Server SendOpcode.INVENTORY_CASH
+constexpr unsigned short LP_MONSTER_BOOK_RESULT = 0x3733; // Server SendOpcode.MONSTER_BOOK_RESULT
 
 namespace players {
 void HandleResponse(CInPacket* pPacket); // worldmapinfo.cpp
@@ -50,6 +51,12 @@ static void __fastcall CClientSocket__ProcessPacket_hook(void* pThis, void* _EDX
         return;
     case kStorageBagSnapshotOpcode: // Server SendOpcode.BAG_WINDOW; handler skips the opcode itself
         StorageBag_HandlePacket(pPacket);
+        return;
+    case LP_MONSTER_BOOK_RESULT:
+        // byte type: 0 drop table (drops module), 1 item hits / 2 droppers (search module). Both only
+        // read under CanRead from the peeked offset and record data; views rebuild on the tick.
+        MonsterBookDrops_OnPacket(pPacket);
+        MonsterBookSearch_OnPacket(pPacket);
         return;
     }
     CClientSocket__ProcessPacket(pThis, pPacket);

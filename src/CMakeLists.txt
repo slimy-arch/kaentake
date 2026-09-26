@@ -35,6 +35,10 @@ add_library(injector SHARED
     critratedisplay.cpp
     statdetaillayout.cpp
     statuilayout.cpp
+    monsterbook.cpp
+    monsterbookfoundin.cpp
+    monsterbookdrops.cpp
+    monsterbooksearch.cpp
     crashlog.cpp
     stringpool.cpp
     debug.cpp

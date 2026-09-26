@@ -22,6 +22,43 @@ inline int get_int32(Ztl_variant_t& v, int nDefault) {
     }
 }
 
+// rvalue form, so get_int32(get_object_or_empty(...), n) compiles without MSVC's permissive mode
+inline int get_int32(Ztl_variant_t&& v, int nDefault) {
+    return get_int32(v, nDefault);
+}
+
+// resman lookup that returns an empty variant instead of throwing when the UOL is missing
+inline Ztl_variant_t get_object_or_empty(const wchar_t* sUOL) {
+    try {
+        if (!sUOL) {
+            return Ztl_variant_t();
+        }
+        IWzResManPtr& rm = get_rm();
+        if (!rm) {
+            return Ztl_variant_t();
+        }
+        return rm->GetObjectA(sUOL);
+    } catch (...) {
+        return Ztl_variant_t();
+    }
+}
+
+inline Ztl_variant_t get_item_or_empty(IWzProperty* pProp, const wchar_t* sName) {
+    try {
+        if (!pProp || !sName) {
+            return Ztl_variant_t();
+        }
+        return pProp->item[sName];
+    } catch (...) {
+        return Ztl_variant_t();
+    }
+}
+
+inline Ztl_variant_t get_item_or_empty(const IWzPropertyPtr& pProp, const wchar_t* sName) {
+    IWzProperty* raw = pProp;
+    return get_item_or_empty(raw, sName);
+}
+
 // implementation in resolution.cpp
 int get_screen_width();
 int get_screen_height();

@@ -46,6 +46,7 @@
 #include "hook.h"
 #include "debug.h"
 #include "cashshopwnd.h"
+#include "storagebag.h"
 #include "clientsocket.h"
 
 #include "wvs/iteminfo.h"
@@ -3634,6 +3635,7 @@ void CashShopWnd_HandleSync(CInPacket* pPacket) {
 // =====================================================
 // CWvsContext::TryCloseUI — v95 sym, v83 VA 0x00A06E55 (ret 4). Stock returns 0 for any
 // window it does not know, which makes Esc open the game menu instead of closing us.
+// The storage bag (storagebag.cpp) shares this one detour.
 static auto CWvsContext__TryCloseUI =
     reinterpret_cast<int(__thiscall*)(void*, void*)>(CashShopWnd::kAddr_TryCloseUI);
 
@@ -3641,6 +3643,9 @@ static int __fastcall CWvsContext__TryCloseUI_hook(void* pThis, void* _EDX, void
     CashShopWnd::CUICashShop* pShop = CashShopWnd::CUICashShop::ms_pInstance;
     if (pWnd && pShop && pWnd == static_cast<CWnd*>(pShop)) {
         pShop->Destroy();                  // OnDestroy plays MenuDown and leaves the stack
+        return 1;
+    }
+    if (StorageBag_TryCloseUI(pWnd)) {
         return 1;
     }
     return CWvsContext__TryCloseUI(pThis, pWnd);

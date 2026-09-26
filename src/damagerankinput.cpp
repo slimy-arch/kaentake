@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "hook.h"
 #include "uiDamageRank.h"
+#include "storagebag.h"
 #include "wvs/field.h"
 
 // DamageRank input: Key Config function key plus field mouse forwarding. The window is a bare Gr2D layer,
@@ -13,12 +14,26 @@
 // 50-54, type 6 ids 100-106); id 55 goes into slot 40, whose position (145,335) already exists in the
 // palette position table at 0x00BE27E0. The server stores any non-skill binding as-is, and its default
 // keymaps put this on F12 (scan code 88).
+//
+// The Storage Bag shares the mechanism: type 4 id 56 in palette slot 41 ((179,335) at 0x00BE2C00),
+// icon Custom.wz UI/UIWindow.img/KeyConfig/icon/56, default F9 (scan code 67).
 
 namespace {
 
-constexpr int kDamageRankFuncKeyType = 4;  // FUNCKEY_MAPPED::nType — UI menu shortcut
-constexpr int kDamageRankFuncKeyId = 55;
-constexpr int kDamageRankPaletteSlot = 40; // first slot past the stock 40
+constexpr int kCustomFuncKeyType = 4;      // FUNCKEY_MAPPED::nType — UI menu shortcut
+
+void ToggleDamageRankFromKey();
+
+// Custom Key Config shortcuts, each in the first palette slots past the stock 40.
+struct CustomFuncKey {
+    int nId;
+    int nPaletteSlot;
+    void (*pfnToggle)();
+};
+constexpr CustomFuncKey kCustomFuncKeys[] = {
+    {55, 40, ToggleDamageRankFromKey},
+    {56, 41, StorageBag_Toggle},
+};
 constexpr int kFuncKeyCount = 89;          // CFuncKeyMappedMan entries, indexed by set-1 scan code
 
 // CUIKeyConfig palette record: this + 0x9DC + 12 * slot = { char nType; int nID (unaligned); int bInUse @+8 }.
@@ -99,16 +114,19 @@ void ToggleDamageRankFromKey() {
 
 void __fastcall CUIKeyConfig__ResetPaletteItems_hook(void* pThis, void* _EDX) {
     CUIKeyConfig__ResetPaletteItems(pThis);
-    auto pRecord = reinterpret_cast<unsigned char*>(pThis) + kPaletteBase + kPaletteStride * kDamageRankPaletteSlot;
-    const int nId = kDamageRankFuncKeyId;
-    pRecord[0] = static_cast<unsigned char>(kDamageRankFuncKeyType);
-    memcpy(pRecord + 1, &nId, sizeof(nId));
-    *reinterpret_cast<int*>(pRecord + 8) = 0; // not in use: shown in the palette
+    for (const auto& key : kCustomFuncKeys) {
+        auto pRecord = reinterpret_cast<unsigned char*>(pThis) + kPaletteBase + kPaletteStride * key.nPaletteSlot;
+        pRecord[0] = static_cast<unsigned char>(kCustomFuncKeyType);
+        memcpy(pRecord + 1, &key.nId, sizeof(key.nId));
+        *reinterpret_cast<int*>(pRecord + 8) = 0; // not in use: shown in the palette
+    }
 }
 
 int __fastcall CUIKeyConfig__GetIdxFromPaletteSlot_hook(void* pThis, void* _EDX, int nSlot) {
-    if (nSlot == kDamageRankPaletteSlot) {
-        return kDamageRankFuncKeyId;
+    for (const auto& key : kCustomFuncKeys) {
+        if (nSlot == key.nPaletteSlot) {
+            return key.nId;
+        }
     }
     return CUIKeyConfig__GetIdxFromPaletteSlot(pThis, nSlot);
 }
@@ -116,8 +134,12 @@ int __fastcall CUIKeyConfig__GetIdxFromPaletteSlot_hook(void* pThis, void* _EDX,
 // Required, not cosmetic: DrawFuncKeyMapped and Add/RemoveFromPalette write the in-use flag at
 // this + (slot + 0xD3) * 12, and the stock mapping returns slot 55 for type 4 id 55 — past the array.
 int __fastcall CUIKeyConfig__GetPaletteSlotFromIdx_hook(void* pThis, void* _EDX, int nType, int nId) {
-    if (nType == kDamageRankFuncKeyType && nId == kDamageRankFuncKeyId) {
-        return kDamageRankPaletteSlot;
+    if (nType == kCustomFuncKeyType) {
+        for (const auto& key : kCustomFuncKeys) {
+            if (nId == key.nId) {
+                return key.nPaletteSlot;
+            }
+        }
     }
     return CUIKeyConfig__GetPaletteSlotFromIdx(pThis, nType, nId);
 }
@@ -146,11 +168,16 @@ int __fastcall CWvsContext__ProcessBasicUIKey_hook(void* pThis, void* _EDX, unsi
     const unsigned char* pEntry = pFuncKeyMan + 4 + nScanCode * 5; // FUNCKEY_MAPPED { char nType; int nID; }
     int nId;
     memcpy(&nId, pEntry + 1, sizeof(nId));
-    if (pEntry[0] != kDamageRankFuncKeyType || nId != kDamageRankFuncKeyId) {
+    if (pEntry[0] != kCustomFuncKeyType) {
         return nResult;
     }
-    ToggleDamageRankFromKey();
-    return 1;
+    for (const auto& key : kCustomFuncKeys) {
+        if (nId == key.nId) {
+            key.pfnToggle();
+            return 1;
+        }
+    }
+    return nResult;
 }
 
 } // namespace
@@ -160,9 +187,11 @@ void AttachDamageRankMod() {
     ATTACH_HOOK(CUIKeyConfig__GetIdxFromPaletteSlot, CUIKeyConfig__GetIdxFromPaletteSlot_hook);
     ATTACH_HOOK(CUIKeyConfig__GetPaletteSlotFromIdx, CUIKeyConfig__GetPaletteSlotFromIdx_hook);
     ATTACH_HOOK(CWvsContext__ProcessBasicUIKey, CWvsContext__ProcessBasicUIKey_hook);
-    Patch4(0x00833FB0, 0x00BE2C00); // CUIKeyConfig::DrawKeyPalette — loop end cmp [ebp-24h],0BE2BF8h: 40 -> 41 slots (id 55)
+    Patch4(0x00833FB0, 0x00BE2C08); // CUIKeyConfig::DrawKeyPalette — loop end cmp [ebp-24h],0BE2BF8h: 40 -> 42 slots (ids 55, 56)
     Patch1(0x00BD8D84, 4);          // DefaultFuncKeyMap table 0x00BD8BCC, F12 (scan code 88) nType: Key Config "Default" = DamageRank
     Patch4(0x00BD8D85, 55);         // ... and its nID, matching the server default keymap
+    Patch1(0x00BD8D1B, 4);          // DefaultFuncKeyMap, F9 (scan code 67, stock entry empty) nType: Storage Bag
+    Patch4(0x00BD8D1C, 56);         // ... and its nID, matching the server default keymap
     ATTACH_HOOK(CField__OnMouseButton, CField__OnMouseButton_hook);
     ATTACH_HOOK(CField__OnMouseMove, CField__OnMouseMove_hook);
     ATTACH_HOOK(CWnd__OnMouseWheel, CWnd__OnMouseWheel_hook);

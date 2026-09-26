@@ -73,6 +73,7 @@ void AttachMagicDamageMod();
 void AttachCritRoutingMod();
 void AttachStatDetailLayoutMod();
 void AttachStatUiLayoutMod();
+void AttachStorageBagMod();
 void AttachCrashLog();
 
 // stage-change cleanup, called from set_stage_hook (resolution.cpp)
@@ -109,6 +110,7 @@ inline void AttachClientHooks() {
     AttachCritRoutingMod();
     AttachStatDetailLayoutMod();
     AttachStatUiLayoutMod();
+    AttachStorageBagMod();
 }
 
 

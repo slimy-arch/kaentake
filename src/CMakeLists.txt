@@ -25,6 +25,7 @@ add_library(injector SHARED
     damageskin.cpp
     damageskinpicker.cpp
     cashshopwnd.cpp
+    storagebag.cpp
     skillui.cpp
     longkeyboard.cpp
     quickslotdlg.cpp
